@@ -14,7 +14,7 @@
 
 ## What works (roughly)
 
-- Steam lobby hosting/invites, or LAN by IP / LAN search; pick your display name
+- Steam lobby hosting/invites(not tested), or LAN by IP / LAN search; pick your display name
 - Seeing your partner: character, animations, gun, shadow, pet, ghost glow, status effects (fire, poison...)
 - Host-led runs: same seed and floors for both players, run start/end and death-screen restarts
 - Player bullets, thrown items (Molotovs, grenades), blanks, floor goop
