@@ -1,5 +1,7 @@
 # Gungeon Online
 
+*Super Duper Alpha please dont look yuck yuck*
+
 **Online co-op for Enter the Gungeon** — a BepInEx mod that lets two players play together over **Steam** or **LAN**.
 
 > ## ⚠️ Very early alpha — side project
