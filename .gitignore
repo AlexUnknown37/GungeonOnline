@@ -1,0 +1,14 @@
+# Third-party mods and game/loader files (reference copies only, never committed)
+BepInEx/
+Alexandria-Alexandria/
+MtG_API-Mod_the_Gungeon_API/
+universal-modder-main/
+
+# Personal save backups
+save-backup/
+
+# Build output
+GungeonOnline/bin/
+GungeonOnline/dist/
+*.dll
+*.pdb

@@ -1,0 +1,331 @@
+# Gungeon Online — MODLOG
+
+Journal for the Enter the Gungeon online co-op mod. Record paths, versions, findings, failures, next steps.
+
+## Setup facts
+- Game: Enter the Gungeon (Steam app 311690), Unity 2017.4.27, Mono, .NET 3.5 profile, 64-bit.
+  Install: `S:\_Games\Steamapps\steamapps\common\Enter the Gungeon`
+- Loader: BepInEx 5.4.21 via **Gale** mod manager. Profile:
+  `%APPDATA%\com.kesomannen.gale\enter-the-gungeon\profiles\Default\BepInEx`
+  (log: `...\Default\BepInEx\LogOutput.log`)
+- The game folder also has leftovers from old Mod the Gungeon (`Assembly-CSharp.Base.mm.dll`, `ETGModInstallLog.txt`). Harmless.
+- Thunderstore dependency string for the loader: `BepInEx-BepInExPack_EtG-5.4.2101`.
+- Reference copies in this folder: `BepInEx/` (copied profile: core DLLs + many plugins), `Alexandria-Alexandria/`, `MtG_API-Mod_the_Gungeon_API/`, `universal-modder-main/`.
+- No .NET SDK installed. Building uses the Windows built-in `csc.exe` (v4.0.30319) with `/nostdlib` against the game's mscorlib, giving a v2.0.50727 assembly that the game loads. **Limit: C# 5 syntax only** (no `$""`, `?.`, `=>` members, `nameof`, `out var`).
+
+## Route
+BepInEx plugin (loader API) + Steamworks.NET that the game already ships.
+- `Assembly-CSharp-firstpass.dll` contains Steamworks.NET (old version): legacy `SteamNetworking` P2P
+  (`SendP2PPacket`/`ReadP2PPacket`/`AcceptP2PSessionWithUser`) and `SteamMatchmaking` lobbies.
+  **No** `SteamNetworkingMessages`/`Sockets` (too old).
+- Game's `SteamManager` (Assembly-CSharp) initializes Steam and runs callbacks; wait for `SteamManager.Initialized`.
+- Callback API: `Callback<T>.Create(DispatchDelegate(T))`, `CallResult<T>.Create/Set(call, APIDispatchDelegate(T, bool ioFailure))`.
+- Useful game members: `GameManager.Instance.PrimaryPlayer/SecondaryPlayer/AllPlayers`, `GameManager.HasInstance`,
+  `CurrentRunSeed` (get/set), `IsFoyer`, `IsLoadingLevel`, `MainCameraController.Camera`;
+  `PlayerController.CenterPosition` (from GameActor), `unadjustedAimPoint`, `PlayerIDX`, `characterIdentity`,
+  `WarpToPoint`, `SetInputOverride`.
+
+## Project layout (`GungeonOnline/`)
+- `src/`
+  - `Plugin` — entry, config (PlayerName, ToggleWindowKey, LAN Port, LastAddress), `DisplayName()`
+  - `Transport` — abstract link: Send(reliable?), Poll, DropPeer, Close; events OnPacket/OnReady/OnLost
+  - `SteamLink` + `SteamLobby` — Steam P2P + friends-only lobby; callbacks live for the whole game (invites)
+  - `LanLink` — UDP; "GO" magic + kind byte; reliable = ushort seq + ack + 0.2 s resend + in-order delivery;
+    host answers Discover broadcasts; SIO_UDP_CONNRESET disabled (Windows)
+  - `LanDiscovery` — broadcast + loopback "any hosts?" on the LAN port
+  - `NetSession` — link-agnostic: Hello/Ping/PlayerState/Bye, timeout, host keeps listening after a drop
+  - `Protocol`, `DebugWindow` (F8: name box, Steam/LAN host/join, LAN finder)
+- `package/` — manifest.json, icon.png (placeholder), README.md
+- `build.ps1` — compiles and writes `dist/GungeonOnline-<version>.zip` (Thunderstore layout, forward-slash zip entries).
+  `-Deploy` also copies it into the Gale **Bare** test profile as `BepInEx\plugins\Gungeon_Online-dev`.
+- Version must match in `package/manifest.json` and `Plugin.ModVersion` (build checks).
+
+## Status
+- 0.1.0: Steam lobby + P2P handshake, ping, position exchange.
+- 0.2.0: Transport abstraction, LAN (UDP) link with discovery, username setting. Builds, deployed to Bare. **Not yet tested in game.**
+  Protocol (both links): joiner sends Hello (reliable) → host takes first sender as partner → Hello back → Connected.
+  Ping 1/s, PlayerState 20/s unreliable, 10 s timeout.
+
+## Testing notes
+- Test profile: Gale profile **Bare** (`...\profiles\Bare`): BepInEx + Alexandria + MtG API only.
+- Steam P2P needs **two different Steam accounts on two PCs**.
+- LAN can be tested on **one PC with two game copies**: host in one, "Find LAN games" / join 127.0.0.1 in the other.
+  **Finding (2026-10-10):** a second copy quits silently. `SteamManager.Awake` calls
+  `SteamAPI.RestartAppIfNecessary(311690)` → `Application.Quit()`. No single-instance mutex (only Mutexes are in
+  TextureScale/AkBankManager). Not a crash, no dump. Valve's standard dev fix: `steam_appid.txt` containing `311690`
+  next to EtG.exe makes RestartAppIfNecessary return false. Second copy must be launched directly (not via Steam).
+  Don't patch this inside the shipped mod (it's Steam's launch check).
+  Both copies share the save folder `%USERPROFILE%\AppData\LocalLow\Dodge Roll\Enter the Gungeon` — back it up first.
+  **Done 2026-10-10:** saves backed up to `save-backup\2026-10-10_0159` (45 files). `steam_appid.txt` created in the
+  game folder (delete it to undo). `GungeonOnline\launch-test-copy.ps1` starts EtG.exe directly with the Bare
+  profile's doorstop args (same args Gale uses); run it once per copy.
+  Gale itself sometimes launches EtG.exe directly, sometimes via `steam.exe -applaunch 311690` (see Gale latest.log).
+- Shareable install: Gale → Import → local mod → pick `dist/GungeonOnline-x.y.z.zip`.
+
+## Findings: characters (0.3.0)
+- `CharacterSelectController.GetCharacterPathFromIdentity(PlayableCharacters)` (static) → "PlayerRogue" (Pilot),
+  "PlayerConvict", "PlayerRobot", "PlayerMarine", "PlayerGuide", "PlayerBullet", "PlayerEevee", "PlayerGunslinger",
+  "PlayerCoopCultist". Load with `BraveResources.Load(path, ".prefab") as GameObject` (asset bundle "assets/ResourcesBundle/").
+- `PlayerController.AlternateCostumeLibrary` / `IsUsingAlternateCostume`; animator: `spriteAnimator.CurrentClip.name`,
+  `CurrentFrame`; clip `frames[i].spriteCollection/spriteId`; sprite `FlipX`, `HeightOffGround`, `IsPerpendicular`, `UpdateZDepth()`.
+- Tool: `tools\il-dump.ps1 -Type X -Method regex` prints IL of game methods (no ILSpy needed).
+
+## Findings: levels and seeds (0.4.0)
+- `Dungeon.GetDungeonSeed()`: uses `GameManager.CurrentRunSeed` if non-zero, else `Dungeon.DungeonSeed`, else a
+  random seed that is **not stored** → host must set a seed (`InitializeForRunWithSeed`) to share it.
+- `m_currentRunSeed` is only written by the setter and QuickRestart: the game **never clears it**. Fresh seed per run,
+  reset to 0 when the session ends.
+- `IsSeeded` is only read by loot code (shops, chests, pedestals, RewardManager) — no achievement impact.
+- All floor loads go through `GameManager.LoadNextLevel()` (private `nextLevelIndex`, public `SetNextLevelIndex`,
+  `InjectedLevelName`) or `LoadCustomLevel(string custom)`. Breach elevator (`FoyerGungeonDoor.HandleLoading`):
+  fade (`Pixelator.Instance.FadeToBlack`), `DelayedLoadNextLevel`, then `Foyer.Instance.OnDepartedFoyer()`.
+- Every dungeon floor runs in scene `LoadingDungeon`, so the "which level" key adds `Dungeon.gameObject.name`.
+- Sync design: Harmony prefixes on host (LoadNextLevel, LoadCustomLevel, ReturnToFoyer) send LevelLoad/ReturnToFoyer;
+  joiner replays them. Known gaps: QuickRestart not synced; joiner can still take elevators alone; if the two saves
+  have different unlocks, generated floors/loot may differ.
+
+## Test results
+- 0.3.0 and 0.4.0 never installed: deploy failed while the game ran, so two more tests still ran 0.2.0.
+  Fix (0.5.0): `launch-test-copy.ps1` auto-installs the newest build when no copy is running (`deploy.ps1`);
+  build.ps1 bumps the minor version each build; `-Name X` → `--gungeon-online-name X` gives each copy its own name
+  (both copies share one BepInEx config file). 0.5.0 installed in Bare 2026-10-10 02:26.
+- 0.5.0 test: puppet appears ("Showing partner as PlayerConvict" on both sides) but user reports "wrong sprite";
+  puppet sat beside the name tag on opposite sides in the two views → suspected FlipX mirroring around the sprite
+  anchor. 0.6.0: send `sprite.WorldBottomCenter` and move the puppet so its WorldBottomCenter matches (protocol 4);
+  window shows partner character/anim/frame and puppet status. Still to confirm whether identity is right.
+- 0.6.0 test: identity is correct (host Pilot, guest Convict; each window names the other right). Puppet status
+  "shown" but nothing visible at the tag — the sprite next to each tag was the LOCAL player (checked against reported
+  positions). WorldBottomCenter is live (transform.position + anchor offset), so placement is fine → rendering issue.
+  0.7.0: copy layer/HeightOffGround/IsPerpendicular/rotation/sorting from the live local player sprite (prefab layer
+  suspected wrong); window shows puppet layer, z, renderer.isVisible and shader name.
+- 0.7.0 test: still invisible (host Soldier, guest Pilot). Puppet: layer FG_Reflection, z ~17-18, isVisible true,
+  shader tk2d/CutoutVertexColorTintableTilted. PlayerController.Start: sprite lives on child "PlayerSprite",
+  `usesOverrideMaterial = true`, material shader = ShaderCache.Acquire(LocalShaderName) → "Brave/PlayerShader"
+  (or ...NoStencil / ...Eevee), copies "_Perpendicular", sets "_PlayerGhostAdjustFactor"; in the Breach sets layer
+  FG_Reflection recursively. 0.8.0: puppet uses `new Material(local player material)` with mainTexture = partner's
+  sprite-def material texture; window compares puppet vs. local (layer, z, on screen, shader).
+- 0.8.0 test: still invisible although puppet and local now match: layer FG_Reflection, z ~16.6-16.8, on screen,
+  shader Brave/LitTk2dCustomFalloffTiltedCutout (the Breach uses this lit shader, not PlayerShader).
+  Remaining differences are tk2d fields set on live sprites: GenerateUV2, CachedPerpState, ApplyEmissivePropertyBlock,
+  AdditionalFlat/PerpForwardPercentage, etc. 0.9.0: puppet = Instantiate(local player's "PlayerSprite" object),
+  children destroyed, all non-sprite MonoBehaviours destroyed, attachedRenderers (private, via reflection) cleared,
+  attachParent null; private material copy whose mainTexture follows the current frame's sheet.
+  F9 dumps full details of both sprites to the log.
+- 0.9.0 test: **puppet visible** at the right place (cloning the live PlayerSprite fixed rendering), but it shows
+  the LOCAL character, frozen → ShowFrame never applied a frame. SetSprite/set_spriteId are normal (no off-screen
+  deferral when called directly). Suspect: `prefab.GetComponentInChildren<tk2dSpriteAnimator>()` picked a non-body
+  animator whose library lacks e.g. "idle_twohands". 0.10.0: search all animator libraries in the prefab (alt costume
+  first), log missing clip names once, keep the puppet hidden until the first partner frame is applied.
+- 0.10.0 test: **animations work** (incl. dodge roll), correct partner character, run-follow worked (both in
+  Base_Castle). Issues: occasional "teleporting"; partner gun not shown; guest arrived with NO gun.
+  Cause of missing gun: FoyerGungeonDoor calls `Foyer.OnDepartedFoyer()` (IsFoyer=false, re-enables guns) right after
+  scheduling DelayedLoadNextLevel, so the host's LoadNextLevel prefix saw IsFoyer=false → startingRun=false → joiner
+  skipped OnDepartedFoyer. 0.11.0: prefix on Foyer.OnDepartedFoyer sets a departedFoyer flag; joiner calls
+  OnDepartedFoyer whenever it leaves the Breach. Also: snapshot interpolation (MotionBuffer: 0.1 s delay, ≤0.15 s
+  extrapolation, smoothed clock offset, 4-unit teleport threshold), state at 30 Hz with sender timestamp, out-of-order
+  guard; gun sync (PickupObjectId → PickupObjectDatabase.GetById → gun sprite collection; spriteId, offset from feet,
+  angle, FlipY, z relative to body) rendered by cloning the stripped body puppet. Protocol 5.
+- 0.11.0 test: guns "close but sometimes draw over player", shadow out of place, bullets not synced.
+  Game facts: `PlayerController.HandleGunDepthInternal` only sets gun `sprite.HeightOffGround` (+/-0.075, 0.4 if
+  preventRotation) then UpdateZDepth; tk2d `UpdateZDepth` on an attached sprite defers to `attachParent`, which sorts
+  its `attachedRenderers`. Shadow = GameActor.ShadowObject (blob from ShadowPrefab, child of the player root, placed
+  at SpriteBottomCenter x). Gun fire: `Gun.ShootSingleProjectile` → `SpawnManager.SpawnProjectile(GameObject prefab,
+  Vector3, Quaternion, bool)` → `LastProjectile`, then sets Owner/Shooter and scales baseData.
+  0.12.0: gun clone attached via `AttachRenderer` with the sender's HeightOffGround (no manual z); shadow = stripped
+  clone of local ShadowObject at feet + sender's offset; BulletSync: postfix SpawnProjectile records prefab, postfix
+  ShootSingleProjectile (owner == PrimaryPlayer) sends Shot (level, prefab name, pos, angle, speed, damage, range,
+  scale); receiver indexes all gun projectile prefabs by name (PickupObjectDatabase.Instance.Objects; singleModule,
+  RawSourceVolley, alternateVolley, rawOptionalReloadVolley, charge, CriticalReplacementProjectile), spawns it with
+  owner/shooter null, collidesWithPlayer false, collidesWithEnemies true. Not covered: beams, item-spawned projectiles.
+  Protocol 6.
+- 0.12.0 test: **bullets work** with the guns tried; gun depth OK. Shadow drawn but offset down-left of the
+  partner (object anchor != drawn area). 0.13.0: send shadow renderer.bounds.center relative to feet; receiver
+  shifts the clone so its bounds center matches; clone sprites get attachParent = null. F9 also dumps both shadows
+  (object pos, scale, parent, each renderer's pos/bounds).
+- 0.13.0 test: black character-shaped silhouette below-left of the puppet (existed before the shadow code); no
+  round shadow under the partner. F9: partner shadow clone renderer `enabled False` (local one True); shadow position
+  matched. Reflections: Pixelator's reflection camera culls only FG_Reflection (cm_refl); objects set material
+  "_ReflectionYOffset" in OnWillRenderObject while `Pixelator.IsRenderingReflectionMap` (AIActor/Gun: bounds.min.y*2
+  + actorReflectionAdditionalOffset; PlayerController.LateUpdate: actorReflectionAdditionalOffset). Puppet kept our
+  player's value → misplaced black reflection. 0.14.0: NoReflection component (offset 100000 during the reflection
+  pass, restored otherwise) on body + gun; shadow renderer forced enabled. Partner has no floor reflection for now.
+- 0.14.0 test: black silhouette still there and it CHANGES WHEN THE LOCAL PLAYER SWITCHES CHARACTER → made from
+  the local player's art, not the reflection (NoReflection didn't help; kept for now). Host ending a run → guest
+  stuck loading forever: GameManager.ReturnToFoyer internally calls LoadNextLevel, so the host sent ReturnToFoyer AND
+  a stray LevelLoad; the joiner started two loads. After rebooting the guest the puppet stayed hidden (likely host
+  still in the run while guest in the Breach).
+  0.15.0: suppress LevelLoad inside ReturnToFoyer/LoadCharacterSelect; joiner follows with DelayedReturnToFoyer once
+  not IsLoadingLevel and ignores LevelLoad while loading; host remembers its last floor and re-sends it (every 8 s)
+  while the partner reports a tt_foyer level; window shows the reason the puppet is hidden; F9 lists every enabled
+  renderer within 3 units of the puppet (path, layer, bounds, sprite/collection, all materials).
+- 0.15.0 test: black sprite "half fixed"; no F9 dump in the logs. Host ending the run did NOT bring the guest back:
+  run end goes through `LoadCharacterSelect(unloadGameData: true, doMainMenu: false)` — pause menu
+  (PauseMenuController.HandleExitToMainMenu → DelayedLoadCharacterSelect(0.15, true, false)) and death screen
+  (AmmonomiconDeathPageController.HandleMainMenu) — never ReturnToFoyer (only elevators/DelayedReturnToFoyer use that).
+  0.16.0/0.17.0: host prefix on LoadCharacterSelect (when not IsFoyer) sends EndRun (protocol 7); joiner, once not
+  loading, fades and calls DelayedLoadCharacterSelect(0.5, true, false). (0.16.0 built but never installed; 0.17.0 adds
+  clearing pendingEndRun on LevelLoad.)
+- **Black silhouette solved (F9 nearby-renderer dump, guest side):** `GungeonOnline Partner Gun/BraveOutlineSprite`
+  (Brave/Internal/SinglePassOutline, sprite from the LOCAL character's collection). Object.Destroy of the clone's
+  children is deferred to end of frame; the gun clone (Instantiate(go)) was made in the same frame and copied the
+  local player's outline child. 0.18.0: DestroyImmediate for the body clone's children, and the gun clone's children too.
+- 0.18.0: black sprite confirmed fixed.
+- Co-op deaths (0.19.0, untested). Game facts: `PlayerController.Die(Vector2)` (private) → if COOP and
+  GetOtherPlayer alive → `HandleCoopDeath(bool ignoreCorpse)` (public IEnumerator; only touches own items +
+  IsPrimaryPlayer, ends in BecomeGhost) else `HandleDeath_CR` (private) → DoGameOver. Chest: `Chest.Initialize`
+  resets static m_IsCoopMode unless GameType COOP; `Chest.Open` coop branch needs COOP + NumberOfLivingPlayers == 1 +
+  ChestIdentifier NORMAL → plays open anim, m_isMimic=false, GiveCoopPartnerBack → `ResurrectFromChest(Vector2
+  chestBottomCenter)` (public, self-contained). Online design (DeathSync): Die prefix → if partner alive on our
+  floor: StartCoroutine(HandleCoopDeath(m_isFalling)) + PlayerDied, skip Die; if partner already a ghost: normal
+  death + TeamWiped (ghost then runs HandleDeath_CR via reflection). Chest.Open prefix while partner is a ghost
+  (NORMAL chest, opener alive): IsOpen=true, play openAnimName, send Revive(chest WorldBottomCenter), no loot.
+  PlayerState carries IsDead (IsGhost || healthHaver.IsDead). Protocol 8. Not covered: boss-kill revive, coop chest
+  look, ghost animations on the puppet.
+- 0.20.0: PvP toggle (config Rules/PvP, host checkbox in F8 window; Rules message on connect + on change,
+  protocol 9). Remote-spawned partner bullets get collidesWithPlayer = session.PvpEnabled. Untested.
+- Enemy sync step 1, "shared health" (0.21.0, untested). Both games simulate enemies; ID = index of room in
+  `Dungeon.data.rooms` * 1000 + order of `RoomHandler.RegisterEnemy` in that room (postfix); messages carry level key
+  + EnemyGuid to reject mismatches. `HealthHaver.ApplyDamage` pre/post health diff → EnemyDamage / EnemyDied (reliable);
+  receiver applies via ApplyDamage(ignore invuln+caps) with applyingRemote guard; dead IDs remembered per floor and
+  killed when they register later. Host EnemyStates 10 Hz (id, specRigidbody.UnitCenter, health): joiner lowers health
+  to host's (ForceSetCurrentHealth) and snaps enemies drifted > 1.5 tiles (transform + specRigidbody.Reinitialize).
+  Partner bullet copies tagged; `Projectile.HandleDamage` prefix/postfix sets RemoteBulletHitting so ApplyDamage on
+  enemies is skipped (no double damage). Protocol 10. Not synced yet: enemy targeting/attacks (each game's enemies
+  attack their own player), room clear/doors, boss phases, enemies spawned by timing/randomness may mismatch.
+- 0.21.0 test: respawn works. Issues: revive chest stays closed in the ghost's game; ghosts should be pulled into
+  fights; with host as ghost enemies froze (host) / rubber-banded (guest); room stayed sealed for the host after the
+  guest cleared it; enemies shudder on guest; ghost pulse kills enemies. Facts: DoGhostBlank → SilencerInstance.
+  TriggerSilencer (push/knockback only, no enemy damage) — kills likely knockback into pits / blank-vulnerable enemies.
+  0.22.0: room authority = whoever is alive and in the room (both send EnemyStates; the host's copy wins if both are);
+  per-frame glide correction (settle 0.25, pull speed 6/s, snap > 4 tiles); ghost's game never applies enemy damage
+  (ApplyDamage skipped while local is ghost, unless from network); dead-on-arrival enemies killed once their room is
+  sealed or after 1.5 s; sealed + no RoomClear enemies for 2 s → UnsealRoom; RoomHandler.SealRoom postfix sends
+  PullGhost (ghost WarpToPoint); Revive also opens the nearest closed chest (≤3 tiles) in the ghost's game.
+  Protocol 11. Requested but deferred: host enemies targeting the guest, dog sync + petting, death item-drop sync.
+- 0.22.0 test (F9 on host): partner was the Guide/Hunter; her dog isn't drawn on the host (pets weren't synced).
+  0.23.0: PlayerController.companions (public List<AIActor>) → first visible companion's EnemyGuid, clip, frame,
+  FlipX, sprite.WorldBottomCenter added to PlayerState (protocol 12). PetPuppet: libraries from
+  EnemyDatabase.GetOrLoadByGuid(guid) animators, sprite = RemotePuppet.CloneStrippedSprite(local player sprite)
+  (now a shared helper), own MotionBuffer for smoothing. Visual only. Petting needs CompanionController.DoPet
+  (public) on a real companion — not done yet.
+- Enemy targeting (0.24.0 built/never installed, 0.25.0): `AIActor.TargetRigidbody` returns `OverrideTarget`
+  when set, else PlayerTarget.specRigidbody; `AIBulletBank.PlayerPosition()` (bullet-script aiming) uses
+  aiActor.TargetRigidbody. TargetSync: invisible SpeculativeRigidbody (12x16 px manual PlayerHitBox collider,
+  CollideWithOthers/TileMap false) follows the partner's smoothed center; 4x/s each active enemy in our room picks
+  the closer player (switch only if 20% closer; ghosts are never targets); chasing-partner enemies get
+  OverrideTarget = that body (re-applied every frame), others have it cleared. Untested: whether behaviours that use
+  PlayerTarget directly ignore it; partner's picture doesn't block bullets.
+- 0.25.0 test: the ghost got stuck after the fight-start warp. Cause: `PlayerController.WarpToPoint(point, poof,
+  followers)` sets transform.position = point; we passed the partner's CenterPosition (half a body off → in walls).
+  0.26.0: PlayerState carries RootOffset (transform.position - sprite feet); PlayerWarp warps to partner feet +
+  RootOffset; ghost pull delayed 1 s and uses the partner's position at that moment; F8 "Teleport to partner"
+  button (disabled with a reason when not connected/other floor/loading/you're alive in a sealed room).
+  Protocol 13. Other game warps worth knowing: ReuniteWithOtherPlayer(PlayerController, bool), TeleportToPoint.
+- 0.27.0: death-screen choices. Host LoadNextLevel prefix also treats QuickRestart as a run start (fresh seed).
+  Joiner: QuickRestart prefix → if host is in the Breach, LoadCharacterSelect(true,false) instead; any joiner run
+  start (Breach elevator / QuickRestart) while the host is in a run adopts the host's seed + floor (index or
+  injected custom level) in the LoadNextLevel prefix. LevelLoad gained a `follow` flag; joiner always stores the
+  host floor; joiner on its own death screen doesn't auto-follow LevelLoad/EndRun/ReturnToFoyer. Host sends its
+  floor (follow=false) on connect. Removed the 8 s auto catch-up. Protocol 14.
+- 0.28.0: ThrowSync. `SpawnObjectPlayerItem.DoSpawn(user, angleFromAim)` has three paths: prefab with Projectile →
+  Instantiate rotated at user center; tossForce 0 → placed at center (anchor 4), quantized 1/16; else Instantiate at
+  center (+0.25 up if aiming up) and `LootEngine.DropItemWithoutInstantiating(obj, pos, Euler(angle)*aim, tossForce,
+  false,false,true,false)`, then DebrisObject flags (BlackHoleDoer → no pits/absorption, aim up → heightBoost -1,
+  IsAccurateDebris, Priority 0, bounceCount). Postfix sends Throw(level, item id, angle, center, aim, synergy); the
+  partner repeats it (skip enemyGuid items, Kage Bunshin, cigarettes). Goop/explosions then happen natively in both
+  games (players get burned by fire on their own floor). EnemyDamage now only for LocalBulletHitting (our projectile
+  HandleDamage); other damage happens in both games natively; EnemyDied always sent. Protocol 15.
+- 0.29.0: petting the partner's dog. Game petting (PlayerController.HandlePlayerInput): InteractAction.WasPressed,
+  not IsPetting/IsInCombat/IsDodgeRolling/queued anim, scans StaticReferenceManager.AllEnemies for companions with
+  CompanionController.CanBePet within 2.5 → DoPet(player) (aiAnimator LockFacing + PlayUntilCancelled("pet")),
+  player spriteAnimator "pet", ToggleGun/HandRenderers(false,"petting"); Update ends it when not playing "pet", > 3
+  tiles or rolling. PetSync re-creates that against the PetPuppet (IsShown/Center added), using m_activeActions via
+  reflection; PetStart(petterOnLeft)/PetStop make the owner's real dog play/end "pet". Protocol 16.
+- 0.30.0: blanks + player look. Every blank = `SilencerInstance.TriggerSilencer(center, expandSpeed, maxRadius,
+  vfx, distIntensity, distRadius, pushForce, pushRadius, knockbackForce, knockbackRadius, extraTime, user,
+  breaksWalls, skipBreakables)`; VFX "Global VFX/BlankVFX" / "Global VFX/BlankVFX_Ghost" (BraveResources). BlankSync
+  postfix (user == PrimaryPlayer) sends all params; receiver runs a new SilencerInstance with user = its own player
+  (guarded against echo). Ghost look = PlayerController.ChangeSpecialShaderFlag / ChangeFlatColorOverride; status
+  tints = GameActor.CurrentOverrideColor; shader IDs from private GameActor fields m_specialFlagsID /
+  m_overrideFlatColorID / m_overrideColorID. PlayerLook reads them from the player's sharedMaterial each state and
+  the puppet material gets the same values. On fire: PlayerController.IsOnFire; puppet gets 3 flame sprites from our
+  own stats.OnFireSourceEffect.FlameVfx. Protocol 17.
+- 0.30.0 pet test: "Petting the partner's dog" logged on every press and the owner got PetStart, but the petting
+  stopped the next frame: without PlayerController.m_pettingTarget the player's animation code replaced "pet" with
+  idle, and our IsPlaying("pet") check ended it. 0.31.0: hold `m_handlingQueuedAnimation = true` while petting (the
+  flag QueueSpecificAnimation uses), re-play "pet" if it ends, stop on moving (velocity, after 0.25 s), rolling,
+  combat or > 3 tiles; clear the flag on stop.
+- 0.31.0 test: fire visuals work. Host's enemies aim at the guest but never fire. AIActor.HasLineOfSightToTarget →
+  HasLineOfSightToRigidbody / HasLineOfSightToTargetFromPosition raycast with the enemy visibility mask and require
+  the hit body == TargetRigidbody; our partner body has no collisions so it never got hit. 0.32.0: postfixes on both
+  return "no wall cell between enemy and partner" (quarter-tile steps over DungeonData.isWall /
+  CheckInBoundsAndValid) when the target is our partner body.
+- 0.32.0 test: dog petting works. Guest stuck loading forever after host quick-restart: guest was a GHOST (not
+  "dead"), TeamWiped was ignored (no log), so it followed the new run as a ghost. Also NullReferenceException in
+  SpeculativeRigidbody.ForceRegenerate from Start / our Reinitialize right after level loads (PhysicsEngine not
+  ready) → partner target body broken for the floor → enemies followed the partner (pathing) but aimed at us and never
+  fired. AIShooter.AimAtTarget/Update also use aiActor.TargetRigidbody.
+  0.33.0: target body created disabled, only enabled/initialized when PhysicsEngine.HasInstance && !IsLoadingLevel,
+  Reinitialize in try/catch (destroy + rebuild on failure). DeathSync.ForceGameOver (ghost or dead, once per run;
+  reset after each LoadNextLevel); TeamWiped uses it; joiner receiving a startingRun LevelLoad while a ghost shows its
+  death screen instead of following.
+- 0.33.0 test: simultaneous death → both saw the partner alive (state ~33 ms old), both became ghosts, guest never got
+  a death screen. 0.34.0: DeathSync.Update every frame: local ghost + partner IsDead for 1 s (or partner disconnected
+  for 3 s) → ForceGameOver, independent of the TeamWiped message. Host restart no longer pulls a joiner who is in a
+  run (alive/ghost/death screen): startingRun LevelLoad while !IsFoyer only stores the host floor and sets
+  WaitingToJoin (F8 hint); the joiner's own Quick Restart / elevator adopts it. A joiner in the Breach still follows.
+- 0.35.0 (user rules): host new run pulls the joiner unless the joiner is on its death screen; joiner Quick Restart
+  before the host restarts is held (WaitingForHost + saved QuickRestartOptions, centered "Waiting for the host..."),
+  then run when the host's startingRun LevelLoad arrives; if the host goes to the Breach instead the joiner goes there.
+  Pulling = RestartOntoHostRun → GameManager.DelayedQuickRestart(0.5, options) (fresh player, fixes ghost carry-over);
+  BeforeLoadNextLevel adopts the host floor (dropped the Remote.HasPlayer requirement: host has no player mid-load).
+- 0.35.0 test (F9 guest): a BulletMan stayed alive in Room_Castle_RP_Dodgems on the guest after the host cleared it
+  (ID mismatch from different spawn order). Dog flashed when a player got hurt; red tint sometimes lingered.
+  HealthHaver.FlashOnHit/EndFlashOnHit set "_OverrideColor" on materialsToFlash; CloneStrippedSprite copies shared our
+  player's material until ApplySheet swapped it, and ApplySheet bailed when def.material was null (dog uses
+  materialInst) → the pet kept sharing our player's material. 0.36.0/0.37.0: clones get `new Material(...)`
+  immediately (gun clone too); ApplySheet uses def.materialInst ?? def.material. RoomCleared: RoomHandler.UnsealRoom
+  postfix (no RoomClear enemies left, sender alive) → partner marks all IDs in that room dead, kills what's left,
+  unseals. PauseSync: living player's GameManager.IsPaused (not loading, not dead) → Paused msg → partner
+  BraveTime.RegisterTimeScaleMultiplier(0, key) + "X paused the game"; cleared on unpause/disconnect/partner dead or
+  loading. Protocol 18. (0.36.0 never installed.)
+- 0.37.0 test: host felt laggy/shuddering while walking; no error spam in logs. Suspect: ApplySheet made a new
+  Material and destroyed the old one on every sprite-sheet switch (walk cycles span several atlases) → GC hitches.
+  0.38.0: SheetMaterials component caches one material per sheet per puppet sprite.
+  WorldSync: MinorBreakable.Break(Vector2) / MajorBreakable.Break(Vector2) (not tables) / FlippableCover.DestroyCover
+  (bool, Vector2?) → Break(kind, base name, position, direction); receiver breaks the nearest same-name unbroken one
+  within 0.75. FlippableCover.Flip(DungeonData.Direction) → TableFlip(name, home, dir). Tables known by "home"
+  position (first seen, scanned each second; same in both games); moved tables (> 0.02, not being corrected) sent
+  ~7/s as TablePositions; receiver glides its copy (transform + specRigidbody.Reinitialize). Protocol 19.
+  Not done: player-vs-partner body collision; rolling (kickable) barrels' movement.
+- 0.39.0: rolling barrels = KickableObject (Interact → private Kick(SpeculativeRigidbody kicker); direction from
+  the kicker's position). Kick postfix sends (name, home, kicker pos); the partner invokes Kick with
+  TargetSync.PartnerBody (the invisible body at the partner's position) as kicker. Barrels tracked by home like tables;
+  the kicking game reports the roll positions (TablePositions entries now carry a kind byte: 3 table, 4 barrel), the
+  other copy (RemotelyKicked) only glides. Protocol 20.
+- 0.38.0/0.39.0 never loaded: Harmony "Undefined target method" for WorldSync.AfterDestroyCover — the overload is
+  DestroyCover(bool, IntVector2?) not Vector2?. A failed patch throws in Plugin.Awake and kills the WHOLE mod.
+  0.40.0 fixed; verified by launching a copy myself: "Gungeon Online 0.40.0 loaded", no patch errors.
+  Lesson: after adding patches, launch once and grep LogOutput.log for "Patching exception" before handing over.
+- 0.40.0 test: host revived via chest → frozen and (seemingly) extra health; laggy. CoopResurrectInternal ends with
+  GameManager.GetOtherPlayer(this).stats.RecalculateStats → NRE online, skipping CurrentInputState = AllInput and
+  healthHaver.IsVulnerable = true (frozen + invulnerable). The revive also FullHeal()s (+6 armor for Robot) — native
+  co-op rule. ReuniteWithOtherPlayer(null) NRE from LateUpdate (ghost leash). WorldSync did FindObjectsOfType every
+  second (+ on every lookup) → hitches.
+  0.41.0/0.42.0: DeathSync.FinishRevive coroutine (after ≥1.5 s / revive done, ≤4 s) restores input, vulnerability,
+  clears "revivepause"; ReuniteWithOtherPlayer(null) → PlayerWarp.TeleportToPartner; WorldSync scans only on floor/
+  room change or every 15 s, lookups don't scan. 0.42.0 built while the user's game was open: NOT yet load-verified.
+- 0.42.0 test: guest walking into barrels didn't break them on the host. Walking → MinorBreakable.OnPreCollision →
+  Break(Vector2) (already patched); there's also a separate Break() with its own body. 0.43.0: also patch Break();
+  log every break sent ("Broke ... telling partner") and every miss on receipt (closest candidate name + distance).
+  Load-verified.
+- The user removed the Gale-imported duplicate (only Gungeon_Online-dev remains as of 0.8.0).
+- The user also imported the zip via Gale (`plugins\Gungeon_Online`), duplicating the dev copy; asked them to uninstall it.
+- 2026-10-10, 0.2.0, LAN on one PC (two copies): **Connected**, ping 7 ms, name tags placed correctly over the partner
+  (WorldToScreenPoint on MainCameraController.Camera is right). LocalAddress() showed a 26.x (Radmin VPN) address
+  instead of the real LAN IP — pick better / list all addresses.
+
+## Next steps
+1. In-game test: plugin loads (log line), F8 window, host lobby, friend joins, ping shows.
+2. Check the name-tag marker lines up with the partner (EtG's pixel-perfect camera may offset WorldToScreenPoint).
+3. Milestone 3: show the partner as a real in-game character (likely by spawning/driving the co-op player).
