@@ -51,3 +51,7 @@ It currently expects the game and a BepInEx copy at the paths at the top of the 
 ## License
 
 MIT
+
+## Support
+
+If you enjoy this side project, you can support me on Ko-fi: https://ko-fi.com/alexjustalex

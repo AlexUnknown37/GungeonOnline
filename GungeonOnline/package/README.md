@@ -65,3 +65,7 @@ Gungeon Online doesn't change any game code yet, so it should work alongside oth
 ## License
 
 MIT
+
+## Support
+
+If you enjoy this side project, you can support me on Ko-fi: https://ko-fi.com/alexjustalex
