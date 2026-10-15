@@ -189,7 +189,7 @@ namespace GungeonOnline
             deadIds.Add(id);
             AIActor a = Find(id, guid);
             if (a != null)
-                ApplyRemoteDamage(a, KillHealth);
+                KillFromPartner(a);
         }
 
         // The game refuses a killing blow on a boss while the (single-player) player is dead, so a host who was
@@ -203,6 +203,30 @@ namespace GungeonOnline
                 return true;
             __result = true;
             return false;
+        }
+
+        // Enemies that died because the partner's game said so. Their money and items dropped in the partner's game
+        // (the purse is shared), so here they die without a drop: entering a room the partner cleared paid out again.
+        // Bosses still drop (Master Round, boss rewards are each player's own).
+        private static readonly HashSet<AIActor> remotelyKilled = new HashSet<AIActor>();
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIActor), "HandleLootPinata")]
+        private static bool BeforeLootDrop(AIActor __instance)
+        {
+            if (!remotelyKilled.Remove(__instance))
+                return true;
+            return __instance.healthHaver != null && __instance.healthHaver.IsBoss;
+        }
+
+        private static void KillFromPartner(AIActor a)
+        {
+            if (remotelyKilled.Count > 500)
+                remotelyKilled.Clear();
+            remotelyKilled.Add(a);
+            ApplyRemoteDamage(a, KillHealth);
+            if (a == null || a.healthHaver == null || !a.healthHaver.IsDead)
+                remotelyKilled.Remove(a);
         }
 
         private static void ApplyRemoteDamage(AIActor a, float amount)
@@ -269,7 +293,7 @@ namespace GungeonOnline
                 if ((a.ParentRoom != null && a.ParentRoom.IsSealed) || now - since > 1.5f)
                 {
                     killQueue.RemoveAt(i);
-                    ApplyRemoteDamage(a, KillHealth);
+                    KillFromPartner(a);
                 }
             }
 
@@ -454,7 +478,7 @@ namespace GungeonOnline
                 {
                     if (a != null && a.healthHaver != null && !a.healthHaver.IsDead)
                     {
-                        ApplyRemoteDamage(a, KillHealth);
+                        KillFromPartner(a);
                         killed++;
                     }
                 }
@@ -477,7 +501,11 @@ namespace GungeonOnline
         private static void AfterSealRoom(RoomHandler __instance)
         {
             PlayerController me = Me;
-            if (!Connected || me == null || LocalIsGhost || me.CurrentRoom != __instance || !DeathSync.PartnerIsGhost)
+            if (!Connected || me == null || LocalIsGhost || me.CurrentRoom != __instance)
+                return;
+            bool bossRoom = __instance.area != null && __instance.area.PrototypeRoomCategory == PrototypeDungeonRoom.RoomCategory.BOSS;
+            // A ghost partner always comes along; a living one too when it's the boss fight.
+            if (!DeathSync.PartnerIsGhost && !bossRoom)
                 return;
             Vector2 pos = me.CenterPosition;
             string level = LevelSync.CurrentLevelKey();
@@ -492,8 +520,16 @@ namespace GungeonOnline
             string level = r.ReadString();
             Vector2 pos = new Vector2(r.ReadSingle(), r.ReadSingle());
             PlayerController me = Me;
-            if (me == null || !me.IsGhost || level != LevelSync.CurrentLevelKey())
+            if (me == null || level != LevelSync.CurrentLevelKey())
                 return;
+            if (!me.IsGhost)
+            {
+                // A boss fight started where the partner is: everyone goes.
+                if (me.healthHaver.IsDead || (me.CurrentRoom != null && me.CurrentRoom.area != null
+                    && me.CurrentRoom.area.PrototypeRoomCategory == PrototypeDungeonRoom.RoomCategory.BOSS))
+                    return;
+                Toast.Show("Boss fight! Bringing you to your partner.", 3f);
+            }
             PlayerWarp.ScheduleGhostPull();
         }
     }

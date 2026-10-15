@@ -453,3 +453,36 @@ BepInEx plugin (loader API) + Steamworks.NET that the game already ships.
   from another flag; CreateOverheadElement postfix relabels "The Cultist", hides other labels/sprites) and a
   CharacterSelectIdleDoer (the mouse hover reads its sprite -> NullReferenceException in HandleCharacterSelect;
   added one, disabled). Verified: selected the Cultist and spawned as PlayerCoopCultist(Clone).
+- 0.77 (protocol 29). Real test feedback round (guest Slayer rejoining Darj on Hollow).
+  FloorCheck.cs: after each floor settles (1 s), fingerprint = every room's PrototypeRoomName@basePosition/
+  dimensions (FNV hash); host sends FloorPrint (41) on new floor and on connect; joiner compares (same level key +
+  seed), logs the first 8 differing rooms, reloads the host floor via LevelSync.ReloadHostFloor (max 2 per floor),
+  else a persistent on-screen warning. Toast.cs: on-screen messages.
+  LevelSync: joiner remembers the floor it's on/loading (ourLevel); a host LevelLoad for that same floor is
+  skipped (joiner took the exit first) instead of reloading it.
+  InventorySync: snapshot includes the character prefab name; joiner sends no snapshots while waiting for the
+  host's answer (6 s), host always answers (bool hasData) - a fresh character could overwrite the remembered one.
+  Host on connect sends RejoinOffer (40) if it remembers the peer in its current run; joiner auto-picks that
+  character on the select screen (Foyer.OnSelectedCharacter with the matching flag) and starts the run
+  (OnDepartedFoyer + DelayedLoadNextLevel -> adoption -> restore). Title join prefers this over Continue.
+  EnemySync: partner-caused deaths (EnemyDied, kill queue, RoomCleared) die without loot (HandleLootPinata
+  skipped; bosses still drop). Boss room SealRoom pulls a living partner too (PlayerWarp pull for alive).
+  BulletSync: Shot carries gunId; receiver plays the gun's shot sound (SetSwitch WPN_Guns + Play_WPN_gun_shot_01
+  or OverrideNormalFireAudioEvent, max one per 60 ms) and spawns its shellCasing; Gun.Reload postfix -> Reload (42)
+  -> Play_WPN_gun_reload_01. Load-verified only (two copies connect, Breach).
+  Not done yet: shopkeeper anger/ban, controllable projectiles (Slayer rocket), beams (wood beam).
+- 0.78 (protocol 30): ShopBan.cs - online, BaseShopController.set_State to Hostile/RefuseService/PreTeleportAway/
+  TeleportAway/Gone is replaced (via __args, the ShopState enum is protected) with Default and the local player is
+  banned from that shop: ShopItemController.Interact blocked + ban lines (Toast), TalkDoerLite.Interact on that
+  shop's m_shopkeep shows ban lines; OnProjectileCreated ignores the partner's copied bullets.
+  BulletSync: Shot carries a netId; our bullets whose direction turned >6 deg from launch send Courses (43:
+  pos/angle/speed, 10 Hz, max 24) -> partner's copy snaps + SendInDirection. BeamSync.cs: our gun's active beams
+  (Gun.m_moduleData[].beam) sent as prefab name/origin/direction at 15 Hz (Beams = 44); partner spawns the prefab
+  like BeamController.FreeFireBeam with no damage/hits, updates Origin/Direction/LateUpdatePosition each frame,
+  CeaseAttack after 0.3 s silence. BreachCultist: TalkDoerLite.Interact on NPC_FoyerCharacter_Cultist (online,
+  Breach) skips the co-op conversation and runs ChangeToNewCharacter(cultist path) with the NPC's FSM state.
+  Load-verified only.
+- 0.79: Table positions: movement was only sent unreliably while moving, so a lost last update left tables apart.
+  WorldSync now sends a table's resting place reliably once it's still for 0.4 s, and every 3 s re-sends every
+  table we moved (reliable, max 40); receiver skips positions it already has and doesn't override a table we're
+  pushing right now. Load-verified.

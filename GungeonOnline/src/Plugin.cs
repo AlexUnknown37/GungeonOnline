@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.76.0";
+        public const string ModVersion = "0.79.0";
 
         public static ManualLogSource Log;
 
@@ -80,6 +80,9 @@ namespace GungeonOnline
             LootSync.Init(session, harmony);
             LoopSync.Init(session, harmony);
             OrbitalSync.Init(session);
+            FloorCheck.Init(session);
+            ShopBan.Init(session, harmony);
+            BeamSync.Init(session);
             BreachCultist.Init(session, harmony);
             InventorySync.Init(session);
             PartnerMapMarker.Init(session);
@@ -151,6 +154,11 @@ namespace GungeonOnline
             LoopSync.Update();
             OrbitalSync.Update();
             InventorySync.Update();
+            InventorySync.UpdateRejoin();
+            FloorCheck.Update();
+            ShopBan.Update();
+            BulletSync.Update();
+            BeamSync.Update();
             PartnerMapMarker.Update();
             LevelSync.Update();
             DeathSync.Update();
@@ -174,6 +182,7 @@ namespace GungeonOnline
             // Draw above the game's own on-screen UI.
             GUI.depth = -1000;
             SaveSlotLabel.Draw();
+            Toast.Draw();
             window.Draw();
             MultiplayerMenu.Draw();
 

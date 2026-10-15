@@ -114,6 +114,32 @@ namespace GungeonOnline
                 s.IsVisible = false;
         }
 
+        // Walking up to the Cultist in the Breach: skip his "join co-op?" conversation and become him right away.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(TalkDoerLite), "Interact")]
+        private static bool BeforeTalkToCultist(TalkDoerLite __instance)
+        {
+            if (!Online || __instance == null || !__instance.name.Contains("FoyerCharacter_Cultist") || !GameManager.HasInstance || !GameManager.Instance.IsFoyer)
+                return true;
+            FoyerCharacterSelectFlag flag = __instance.GetComponent<FoyerCharacterSelectFlag>();
+            string path = flag != null && !string.IsNullOrEmpty(flag.CharacterPrefabPath)
+                ? flag.CharacterPrefabPath
+                : CharacterSelectController.GetCharacterPathFromIdentity(PlayableCharacters.CoopCultist);
+            PlayerController me = GameManager.Instance.PrimaryPlayer;
+            if (me != null && me.characterIdentity == PlayableCharacters.CoopCultist)
+                return false; // already him
+            PlayMakerFSM fsm = __instance.GetComponent<PlayMakerFSM>();
+            HutongGames.PlayMaker.FsmState state = fsm != null && fsm.Fsm != null ? (fsm.Fsm.ActiveState ?? (fsm.Fsm.States.Length > 0 ? fsm.Fsm.States[0] : null)) : null;
+            if (state == null)
+                return true;
+            Plugin.Log.LogInfo("Online: talking to the Cultist picks him as our character.");
+            ChangeToNewCharacter change = new ChangeToNewCharacter();
+            change.PlayerPrefabPath = path;
+            change.Init(state);
+            change.OnEnter();
+            return false;
+        }
+
         [HarmonyPrefix]
         [HarmonyPatch(typeof(ChangeCoopMode), "OnEnter")]
         private static bool BeforeChangeCoopMode(ChangeCoopMode __instance)

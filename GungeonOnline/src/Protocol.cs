@@ -44,13 +44,18 @@ namespace GungeonOnline
         Inventory = 37,  // joiner -> host: what we carry (the host remembers it for a rejoin)
         InventoryRequest = 38, // joiner -> host: we're back on your run, do you remember our items?
         InventoryRestore = 39, // host -> joiner: your items from before
+        RejoinOffer = 40, // host -> joiner: we remember you in this run (your character); rejoin automatically
+        FloorPrint = 41, // host -> joiner: fingerprint of our floor (every room's name/position/size)
+        Reload = 42,     // we reloaded: the partner plays the reload sound
+        Courses = 43,    // our steered/bouncing bullets: where they are and where they head now
+        Beams = 44,      // our gun's beams: kind, start point, direction
         Progress = 28,   // host -> joiner: one part of the host's save progress (floors are built from it)
     }
 
     public static class Protocol
     {
         // Bump this whenever the packet format changes, so old and new versions refuse to talk.
-        public const int Version = 28;
+        public const int Version = 30;
         public const int Channel = 0;
         public const int MaxPlayers = 2;
 

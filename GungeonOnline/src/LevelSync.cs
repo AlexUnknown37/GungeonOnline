@@ -58,6 +58,9 @@ namespace GungeonOnline
             harmony.PatchAll(typeof(LevelSync));
         }
 
+        // Joiner: the floor we're on (or loading), to skip loading the same floor twice.
+        private static LevelInfo ourLevel;
+
         // Joiner: the host is in a run right now (we know its floor).
         public static bool HostInRun
         {
@@ -150,6 +153,7 @@ namespace GungeonOnline
                 if (startingRun && hostLevel != null && !PartnerInBreach)
                 {
                     Plugin.Log.LogInfo((savedRun ? "Continuing our saved run" : "Starting a run") + " while the host is in one: joining the host's floor (seed " + hostLevel.Seed + ").");
+                    ourLevel = hostLevel;
                     InventorySync.OnJoinedHostRun(savedRun);
                     __instance.InitializeForRunWithSeed(hostLevel.Seed);
                     if (hostLevel.Custom.Length > 0)
@@ -157,6 +161,12 @@ namespace GungeonOnline
                     else
                         nextLevelIndexField.SetValue(__instance, hostLevel.Index);
                 }
+                // Remember which floor we're loading (also when we took the exit before the host did).
+                LevelInfo loading = new LevelInfo();
+                loading.Seed = __instance.CurrentRunSeed;
+                loading.Index = (int)nextLevelIndexField.GetValue(__instance);
+                loading.Custom = __instance.InjectedLevelName ?? "";
+                ourLevel = loading;
                 return;
             }
             if (!IsConnectedHost())
@@ -390,6 +400,14 @@ namespace GungeonOnline
             pendingFoyerReturn = false;
             pendingEndRun = false;
 
+            // Already on (or loading) exactly this floor, e.g. we took the exit first: loading it again would throw
+            // away everything that happened there.
+            if (ourLevel != null && ourLevel.Seed == seed && ourLevel.Index == levelIndex && ourLevel.Custom == customLevel && !gm.IsFoyer)
+            {
+                Plugin.Log.LogInfo("Host loaded the floor we're already on; not loading it again.");
+                return;
+            }
+            ourLevel = hostLevel;
             Plugin.Log.LogInfo("Following host to level (index " + levelIndex + ", custom '" + customLevel + "', seed " + seed + ")");
             gm.InitializeForRunWithSeed(seed);
             bool wasInFoyer = gm.IsFoyer;
@@ -416,9 +434,37 @@ namespace GungeonOnline
                 Foyer.Instance.OnDepartedFoyer();
         }
 
+        // FloorCheck: our floor doesn't match the host's; load the host's floor again. False if we can't now.
+        public static bool ReloadHostFloor()
+        {
+            if (!IsConnectedJoiner() || hostLevel == null || !GameManager.HasInstance)
+                return false;
+            GameManager gm = GameManager.Instance;
+            if (gm.IsLoadingLevel || gm.IsFoyer || gm.PrimaryPlayer == null || OnDeathScreen)
+                return false;
+            Plugin.Log.LogInfo("Reloading the host's floor (index " + hostLevel.Index + ", seed " + hostLevel.Seed + ").");
+            ourLevel = hostLevel;
+            gm.InitializeForRunWithSeed(hostLevel.Seed);
+            if (Pixelator.Instance != null)
+                Pixelator.Instance.FadeToBlack(LoadDelay, false, 0f);
+            if (hostLevel.Custom.Length > 0 && hostLevel.Index < 0)
+            {
+                gm.DelayedLoadCustomLevel(LoadDelay, hostLevel.Custom);
+            }
+            else
+            {
+                if (hostLevel.Custom.Length > 0)
+                    gm.InjectedLevelName = hostLevel.Custom;
+                gm.SetNextLevelIndex(hostLevel.Index);
+                gm.DelayedLoadNextLevel(LoadDelay);
+            }
+            return true;
+        }
+
         public static void OnReturnToFoyer()
         {
             hostLevel = null;
+            ourLevel = null;
             if (!GameManager.HasInstance || GameManager.Instance.IsFoyer || OnDeathScreen)
                 return;
             Plugin.Log.LogInfo("Host returned to the Breach; following.");
@@ -429,6 +475,7 @@ namespace GungeonOnline
         public static void OnEndRun()
         {
             hostLevel = null;
+            ourLevel = null;
             if (!GameManager.HasInstance || GameManager.Instance.IsFoyer)
                 return;
             if (OnDeathScreen && !WaitingForHost)

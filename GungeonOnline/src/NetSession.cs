@@ -296,6 +296,8 @@ namespace GungeonOnline
                         SaveSync.SendProgress(false);
                         LoopSync.SendState(true);
                         LevelSync.OnConnected();
+                        InventorySync.OnConnected();
+                        FloorCheck.OnConnected();
                         Plugin.Log.LogInfo("Connected to " + PeerName + " over " + Link.Kind + "!");
                         break;
 
@@ -453,6 +455,28 @@ namespace GungeonOnline
                     case MsgType.InventoryRestore:
                         if (!Link.IsHost)
                             InventorySync.OnInventoryRestore(r);
+                        break;
+
+                    case MsgType.RejoinOffer:
+                        if (!Link.IsHost)
+                            InventorySync.OnRejoinOffer(r);
+                        break;
+
+                    case MsgType.FloorPrint:
+                        if (!Link.IsHost)
+                            FloorCheck.OnFloorPrint(r);
+                        break;
+
+                    case MsgType.Reload:
+                        BulletSync.OnReload(r);
+                        break;
+
+                    case MsgType.Courses:
+                        BulletSync.OnCourses(r);
+                        break;
+
+                    case MsgType.Beams:
+                        BeamSync.OnBeams(r);
                         break;
 
                     case MsgType.Progress:

@@ -11,6 +11,11 @@ namespace GungeonOnline
     // - Host: keeps the latest list per partner name, tagged with the run's seed.
     // - Joiner starting on the host's run again (not via Continue, which restores its own save): asks the host;
     //   if the host has a list for this partner and this run, the joiner gets those items given back.
+    // - Rejoining: when a joiner the host remembers connects while the host is in that run, the host offers their
+    //   old character. The joiner picks it by itself on the character-select screen and goes straight into the run
+    //   (no Breach), where the items come back. New joiners still start in the Breach.
+    // - While the host's answer is pending, the joiner sends no lists (its fresh character must not overwrite the
+    //   host's memory of the old one).
     public static class InventorySync
     {
         private const float CheckInterval = 2f;
@@ -18,6 +23,7 @@ namespace GungeonOnline
         private class Snapshot
         {
             public int Seed;
+            public string Character = "";   // player prefab name, e.g. "PlayerMarine" or "PlayerSlayer"
             public List<int> GunIds = new List<int>();
             public List<int> GunAmmo = new List<int>();
             public List<int> Passives = new List<int>();
@@ -28,6 +34,7 @@ namespace GungeonOnline
             public void Write(BinaryWriter w)
             {
                 w.Write(Seed);
+                w.Write(Character ?? "");
                 w.Write(GunIds.Count);
                 for (int i = 0; i < GunIds.Count; i++)
                 {
@@ -44,6 +51,7 @@ namespace GungeonOnline
             {
                 Snapshot s = new Snapshot();
                 s.Seed = r.ReadInt32();
+                s.Character = r.ReadString();
                 int guns = r.ReadInt32();
                 for (int i = 0; i < guns; i++)
                 {
@@ -90,6 +98,16 @@ namespace GungeonOnline
         private static readonly Dictionary<string, Snapshot> remembered = new Dictionary<string, Snapshot>();
         // Joiner: we just started on the host's run (fresh character): ask for our items once we're in.
         private static bool askWhenReady;
+        private static float answerPendingUntil = -1f;
+        // Joiner: the host remembers us in its current run, with this character.
+        private static string rejoinCharacter;
+        private static float rejoinOfferedAt;
+        private static bool rejoinPicked;
+
+        public static bool HasRejoinOffer
+        {
+            get { return rejoinCharacter != null; }
+        }
 
         public static void Init(NetSession netSession)
         {
@@ -112,6 +130,7 @@ namespace GungeonOnline
         {
             Snapshot s = new Snapshot();
             s.Seed = GameManager.Instance.CurrentRunSeed;
+            s.Character = me.gameObject.name.Replace("(Clone)", "").Trim();
             if (me.inventory != null)
             {
                 foreach (Gun g in me.inventory.AllGuns)
@@ -152,9 +171,12 @@ namespace GungeonOnline
             if (askWhenReady)
             {
                 askWhenReady = false;
+                answerPendingUntil = Time.realtimeSinceStartup + 6f;
                 int seed = gm.CurrentRunSeed;
                 session.SendReliable(MsgType.InventoryRequest, delegate (BinaryWriter w) { w.Write(seed); });
             }
+            if (Time.realtimeSinceStartup < answerPendingUntil)
+                return;
 
             // Joiner: tell the host what we carry (only when it changed).
             if (Time.realtimeSinceStartup < nextCheckAt || me.IsGhost || me.healthHaver.IsDead)
@@ -166,6 +188,75 @@ namespace GungeonOnline
                 return;
             lastSentKey = key;
             session.SendReliable(MsgType.Inventory, delegate (BinaryWriter w) { s.Write(w); });
+        }
+
+        // Host: a joiner connected. If we remember them in our current run, offer their old character.
+        public static void OnConnected()
+        {
+            if (session == null || session.Link == null || !session.Link.IsHost || !GameManager.HasInstance)
+                return;
+            GameManager gm = GameManager.Instance;
+            Snapshot s;
+            if (gm.IsFoyer || gm.CurrentRunSeed == 0 || !remembered.TryGetValue(session.PeerName ?? "", out s) || s.Seed != gm.CurrentRunSeed)
+                return;
+            string character = s.Character;
+            Plugin.Log.LogInfo(session.PeerName + " is back: offering their place in the run as " + character + ".");
+            session.SendReliable(MsgType.RejoinOffer, delegate (BinaryWriter w) { w.Write(character); });
+        }
+
+        public static void OnRejoinOffer(BinaryReader r)
+        {
+            rejoinCharacter = r.ReadString();
+            rejoinOfferedAt = Time.realtimeSinceStartup;
+            rejoinPicked = false;
+            Plugin.Log.LogInfo("The host remembers us in its run (" + rejoinCharacter + "): rejoining automatically.");
+        }
+
+        // Joiner: pick our old character on the character-select screen, then start the run (which joins the host's).
+        public static void UpdateRejoin()
+        {
+            if (rejoinCharacter == null || session == null || session.Link == null || session.Link.IsHost)
+                return;
+            if (Time.realtimeSinceStartup - rejoinOfferedAt > 120f || !LevelSync.HostInRun)
+            {
+                rejoinCharacter = null;
+                return;
+            }
+            GameManager gm = GameManager.HasInstance ? GameManager.Instance : null;
+            if (gm == null || !gm.IsFoyer || gm.IsLoadingLevel || Foyer.Instance == null)
+                return;
+            if (!rejoinPicked && gm.IsSelectingCharacter && Foyer.IsCurrentlyPlayingCharacterSelect == false)
+            {
+                foreach (FoyerCharacterSelectFlag flag in Object.FindObjectsOfType<FoyerCharacterSelectFlag>())
+                {
+                    if (flag == null || string.IsNullOrEmpty(flag.CharacterPrefabPath))
+                        continue;
+                    string path = flag.CharacterPrefabPath;
+                    int slash = path.LastIndexOf('/');
+                    if (slash >= 0)
+                        path = path.Substring(slash + 1);
+                    if (!string.Equals(path, rejoinCharacter, System.StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    rejoinPicked = true;
+                    Plugin.Log.LogInfo("Picking our old character " + rejoinCharacter + ".");
+                    Foyer.Instance.StartCoroutine(Foyer.Instance.OnSelectedCharacter(0.25f, flag));
+                    return;
+                }
+                rejoinPicked = true; // not found: keep whatever gets picked
+                Plugin.Log.LogWarning("Couldn't find our old character " + rejoinCharacter + " to pick; pick any character.");
+                return;
+            }
+            // Character chosen: start the run right away (it joins the host's floor).
+            if (!gm.IsSelectingCharacter && gm.PrimaryPlayer != null && !Foyer.IsCurrentlyPlayingCharacterSelect)
+            {
+                rejoinCharacter = null;
+                Plugin.Log.LogInfo("Rejoining the host's run.");
+                Toast.Show("Rejoining the run...", 3f);
+                if (Pixelator.Instance != null)
+                    Pixelator.Instance.FadeToBlack(0.5f, false, 0f);
+                Foyer.Instance.OnDepartedFoyer();
+                gm.DelayedLoadNextLevel(0.5f);
+            }
         }
 
         // Host: remember the joiner's latest list.
@@ -183,15 +274,24 @@ namespace GungeonOnline
             if (!remembered.TryGetValue(session.PeerName ?? "", out s) || s.Seed != seed || !GameManager.HasInstance
                 || GameManager.Instance.CurrentRunSeed != seed)
             {
+                // Nothing to give back: say so, so the joiner stops waiting.
+                session.SendReliable(MsgType.InventoryRestore, delegate (BinaryWriter w) { w.Write(false); });
                 return;
             }
             Plugin.Log.LogInfo(session.PeerName + " rejoined our run: sending back their items.");
-            session.SendReliable(MsgType.InventoryRestore, delegate (BinaryWriter w) { s.Write(w); });
+            session.SendReliable(MsgType.InventoryRestore, delegate (BinaryWriter w) { w.Write(true); s.Write(w); });
         }
 
         // Joiner: get our items back.
         public static void OnInventoryRestore(BinaryReader r)
         {
+            answerPendingUntil = -1f;
+            rejoinCharacter = null;
+            if (!r.ReadBoolean())
+            {
+                Plugin.Log.LogInfo("The host has no items saved for us in this run.");
+                return;
+            }
             Snapshot s = Snapshot.Read(r);
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             if (me == null || GameManager.Instance.CurrentRunSeed != s.Seed)
@@ -226,6 +326,7 @@ namespace GungeonOnline
             me.healthHaver.Armor = s.Armor;
             me.Blanks = s.Blanks;
             Plugin.Log.LogInfo("The host remembered our items: got " + given + " back.");
+            Toast.Show("Welcome back! Your items and health were restored.", 5f);
         }
 
         // Items we had that this character doesn't have yet (a passive picked up twice is given twice).

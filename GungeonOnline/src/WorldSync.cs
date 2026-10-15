@@ -31,7 +31,13 @@ namespace GungeonOnline
             public Vector2 LastKnown;
             public Vector2? Target;   // where the partner says it is (we glide there)
             public bool RemotelyKicked; // barrel: the partner kicked it, so they report its roll
+            public float MovedAt = -1f;   // when WE last moved it
+            public bool SettleSent = true; // its resting place was sent reliably
         }
+
+        private const float SettleTime = 0.4f;     // no movement this long = it came to rest
+        private const float ResyncInterval = 3f;   // re-send every moved table this often (lost messages)
+        private static float nextResync;
         private static readonly Dictionary<FlippableCover, TableInfo> tables = new Dictionary<FlippableCover, TableInfo>();
         private static Dungeonator.Dungeon tablesFloor;
         private static float nextTableScan, nextTableSend;
@@ -396,6 +402,7 @@ namespace GungeonOnline
             List<byte> kinds = new List<byte>();
             CollectMoved(tables, (byte)Kind.Table, moved, infos, kinds);
             CollectMoved(barrels, KickKind, moved, infos, kinds);
+            SendSettledAndResync(now);
             if (moved.Count == 0)
                 return;
             string level = LevelSync.CurrentLevelKey();
@@ -414,6 +421,49 @@ namespace GungeonOnline
         }
 
         private const byte KickKind = 4;
+
+        // Movement is sent fast but without delivery guarantee, so a lost last message left the table in a
+        // different place on the other screen. Safety nets:
+        // - when a table WE moved comes to rest, its resting place is sent with guaranteed delivery;
+        // - every few seconds, every table we moved away from its starting place is sent again.
+        private static void SendSettledAndResync(float now)
+        {
+            List<Component> list = new List<Component>();
+            List<TableInfo> infos = new List<TableInfo>();
+            bool resync = now >= nextResync;
+            if (resync)
+                nextResync = now + ResyncInterval;
+            foreach (KeyValuePair<FlippableCover, TableInfo> pair in tables)
+            {
+                TableInfo info = pair.Value;
+                if (pair.Key == null || pair.Key.IsBroken || info.Target.HasValue || info.MovedAt < 0f)
+                    continue;
+                bool settled = !info.SettleSent && now - info.MovedAt > SettleTime;
+                if (!settled && !resync)
+                    continue;
+                if (settled)
+                    info.SettleSent = true;
+                list.Add(pair.Key);
+                infos.Add(info);
+                if (list.Count >= 40)
+                    break;
+            }
+            if (list.Count == 0)
+                return;
+            string level = LevelSync.CurrentLevelKey();
+            session.SendReliable(MsgType.TablePositions, delegate (BinaryWriter w)
+            {
+                w.Write(level);
+                w.Write((ushort)list.Count);
+                for (int i = 0; i < list.Count; i++)
+                {
+                    w.Write((byte)Kind.Table);
+                    w.Write(BaseName(list[i].gameObject));
+                    w.Write(infos[i].Home.x); w.Write(infos[i].Home.y);
+                    w.Write(list[i].transform.position.x); w.Write(list[i].transform.position.y);
+                }
+            });
+        }
 
         private static void Glide<T>(Dictionary<T, TableInfo> items) where T : BraveBehaviour
         {
@@ -449,6 +499,8 @@ namespace GungeonOnline
                 if (((Vector2)pair.Key.transform.position - pair.Value.LastKnown).sqrMagnitude > TableMoved * TableMoved)
                 {
                     pair.Value.LastKnown = pair.Key.transform.position;
+                    pair.Value.MovedAt = Time.realtimeSinceStartup;
+                    pair.Value.SettleSent = false;
                     moved.Add(pair.Key);
                     infos.Add(pair.Value);
                     kinds.Add(kind);
@@ -478,8 +530,14 @@ namespace GungeonOnline
                 else
                 {
                     FlippableCover t = TableAtHome(name, home);
-                    if (t != null && !t.IsBroken)
-                        tables[t].Target = pos;
+                    if (t == null || t.IsBroken)
+                        continue;
+                    TableInfo info = tables[t];
+                    // We're pushing it ourselves right now: ours wins until it rests.
+                    if (info.MovedAt >= 0f && Time.realtimeSinceStartup - info.MovedAt < SettleTime)
+                        continue;
+                    if (((Vector2)t.transform.position - pos).sqrMagnitude > TableMoved * TableMoved)
+                        info.Target = pos;
                 }
             }
         }

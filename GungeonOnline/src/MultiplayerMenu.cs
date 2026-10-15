@@ -331,7 +331,8 @@ namespace GungeonOnline
                 return;
             Close();
             bool canContinue = title.ContinueGameButton != null && title.ContinueGameButton.IsVisible && GameManager.HasValidMidgameSave();
-            if (LevelSync.HostInRun && canContinue)
+            // The host remembering us in its run beats our own saved run (that rejoins with our items as they were).
+            if (LevelSync.HostInRun && canContinue && !InventorySync.HasRejoinOffer)
             {
                 Plugin.Log.LogInfo("Joined a host who is in a run: continuing our saved run on their floor.");
                 title.ContinueGameButton.DoClick();

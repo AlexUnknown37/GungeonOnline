@@ -67,9 +67,9 @@ namespace GungeonOnline
             ghostPullAt = -1f;
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             string reason;
-            if (me == null || !me.IsGhost || !CanTeleportToPartner(out reason))
+            if (me == null || !CanTeleportToPartner(out reason))
                 return;
-            Plugin.Log.LogInfo("Partner started a fight; joining them as a ghost.");
+            Plugin.Log.LogInfo(me.IsGhost ? "Partner started a fight; joining them as a ghost." : "Partner started the boss fight; joining them.");
             me.WarpToPoint(PartnerBasePoint, true, true);
         }
     }
