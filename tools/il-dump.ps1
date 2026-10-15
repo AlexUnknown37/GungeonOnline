@@ -1,6 +1,8 @@
 # Prints the IL (compiled instructions) of game methods, so we can read how the game does something.
 # Usage: powershell -File il-dump.ps1 -Type GameManager -Method LoadCharacterSelect
 #        (add -Dll Assembly-CSharp-firstpass.dll for the other game DLL; -Method accepts a regex)
+#        For another mod's DLL pass its full path: -Dll "C:\...\plugins\Some_Mod\Mod.dll" (references are
+#        found in the game folder and the Bare profile's BepInEx folders).
 param(
     [Parameter(Mandatory = $true)][string]$Type,
     [Parameter(Mandatory = $true)][string]$Method,
@@ -8,13 +10,24 @@ param(
     [string]$Managed = "S:\_Games\Steamapps\steamapps\common\Enter the Gungeon\EtG_Data\Managed"
 )
 
+$profileDir = "$env:APPDATA\com.kesomannen.gale\enter-the-gungeon\profiles\Bare\BepInEx"
+$global:searchDirs = @($Managed) + @(Get-ChildItem "$profileDir\core", "$profileDir\plugins", "$profileDir\monomod" -Directory -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) + @("$profileDir\core")
+$global:resolved = @{}
 [AppDomain]::CurrentDomain.add_ReflectionOnlyAssemblyResolve({
     param($s, $e)
-    $n = (New-Object Reflection.AssemblyName $e.Name).Name
-    $p = "$Managed\$n.dll"
-    if (Test-Path $p) { [Reflection.Assembly]::ReflectionOnlyLoadFrom($p) } else { [Reflection.Assembly]::ReflectionOnlyLoad($e.Name) }
+    $n = $e.Name.Split(',')[0]
+    if ($global:resolved.ContainsKey($n)) { return $global:resolved[$n] }
+    $found = $null
+    foreach ($d in $global:searchDirs) {
+        $p = [IO.Path]::Combine($d, "$n.dll")
+        if ([IO.File]::Exists($p)) { $found = [Reflection.Assembly]::ReflectionOnlyLoadFrom($p); break }
+    }
+    if ($found -eq $null) { $found = [Reflection.Assembly]::ReflectionOnlyLoad($e.Name) }
+    $global:resolved[$n] = $found
+    return $found
 })
-$asm = [Reflection.Assembly]::ReflectionOnlyLoadFrom("$Managed\$Dll")
+$dllPath = if ([IO.Path]::IsPathRooted($Dll)) { $Dll } else { "$Managed\$Dll" }
+$asm = [Reflection.Assembly]::ReflectionOnlyLoadFrom($dllPath)
 
 # Build opcode lookup tables (one-byte and two-byte 0xFE xx opcodes).
 $one = @{}; $two = @{}

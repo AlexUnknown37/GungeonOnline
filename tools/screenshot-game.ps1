@@ -1,6 +1,6 @@
-# Saves a screenshot of the first Enter the Gungeon window to the given file.
+# Saves a screenshot of the Enter the Gungeon window of copy -Index (0 = first started) to the given file.
 # Usage: powershell -File screenshot-game.ps1 -Out C:\path\shot.png
-param([Parameter(Mandatory = $true)][string]$Out)
+param([Parameter(Mandatory = $true)][string]$Out, [int]$Index = 0)
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System; using System.Runtime.InteropServices;
@@ -10,11 +10,11 @@ public class EtgWin {
     public struct RECT { public int L, T, R, B; }
 }
 "@
-$p = Get-Process EtG -ErrorAction Stop | Select-Object -First 1
-[EtgWin]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
+. "$PSScriptRoot\find-game-window.ps1" -Index $Index
+[EtgWin]::SetForegroundWindow($GameWindow) | Out-Null
 Start-Sleep -Milliseconds 800
 $r = New-Object EtgWin+RECT
-[EtgWin]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+[EtgWin]::GetWindowRect($GameWindow, [ref]$r) | Out-Null
 $w = $r.R - $r.L; $h = $r.B - $r.T
 $bmp = New-Object Drawing.Bitmap $w, $h
 $g = [Drawing.Graphics]::FromImage($bmp)

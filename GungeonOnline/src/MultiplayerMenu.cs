@@ -44,6 +44,7 @@ namespace GungeonOnline
 
         public static void Update()
         {
+            UpdateJoinerTitleStart();
             if (open && Input.GetKeyDown(KeyCode.Escape))
                 Close();
         }
@@ -273,16 +274,73 @@ namespace GungeonOnline
             }
         }
 
-        // Hosting or joining from the title screen: go into the Breach right away, by pressing the title
-        // screen's own PLAY button (exactly what clicking it does). Does nothing outside the title screen.
+        // Hosting or joining from the title screen: leave the title screen right away by pressing one of its own
+        // buttons (exactly what clicking it does). Does nothing outside the title screen.
+        // - Host: PLAY (into the Breach).
+        // - Joiner: first waits until connected and told where the host is. If the host is in a run and we have a
+        //   saved run, CONTINUE: we get our saved character and items back, on the host's floor (LevelSync).
+        //   Otherwise PLAY (the Breach; a run started there joins the host's run).
+        private const float JoinDecisionTimeout = 8f;
+        private static float joinerTitleStartAt = -1f;
+        private static float connectedSince = -1f;
+
         public static void EnterBreachFromTitle()
         {
-            MainMenuFoyerController title = Object.FindObjectOfType(typeof(MainMenuFoyerController)) as MainMenuFoyerController;
-            if (title == null || title.NewGameButton == null || !title.NewGameButton.IsVisible)
+            MainMenuFoyerController title = TitleScreen();
+            if (title == null)
                 return;
+            if (session.Link != null && !session.Link.IsHost)
+            {
+                joinerTitleStartAt = Time.realtimeSinceStartup;
+                connectedSince = -1f;
+                message = "Connecting...";
+                return;
+            }
             Plugin.Log.LogInfo("Started multiplayer from the title screen: entering the Breach.");
             Close();
             title.NewGameButton.DoClick();
+        }
+
+        private static MainMenuFoyerController TitleScreen()
+        {
+            MainMenuFoyerController title = Object.FindObjectOfType(typeof(MainMenuFoyerController)) as MainMenuFoyerController;
+            if (title == null || title.NewGameButton == null || !title.NewGameButton.IsVisible)
+                return null;
+            return title;
+        }
+
+        private static void UpdateJoinerTitleStart()
+        {
+            if (joinerTitleStartAt < 0f)
+                return;
+            float now = Time.realtimeSinceStartup;
+            if (session.Link == null)
+            {
+                joinerTitleStartAt = -1f; // gave up joining
+                return;
+            }
+            if (session.Status == NetSession.State.Connected && connectedSince < 0f)
+                connectedSince = now;
+            // The host's "where I am" arrives right after connecting; give it a moment.
+            bool ready = connectedSince >= 0f && now - connectedSince > 1f;
+            if (!ready && now - joinerTitleStartAt < JoinDecisionTimeout)
+                return;
+            joinerTitleStartAt = -1f;
+            MainMenuFoyerController title = TitleScreen();
+            if (title == null)
+                return;
+            Close();
+            bool canContinue = title.ContinueGameButton != null && title.ContinueGameButton.IsVisible && GameManager.HasValidMidgameSave();
+            if (LevelSync.HostInRun && canContinue)
+            {
+                Plugin.Log.LogInfo("Joined a host who is in a run: continuing our saved run on their floor.");
+                title.ContinueGameButton.DoClick();
+            }
+            else
+            {
+                Plugin.Log.LogInfo("Joined from the title screen: entering the Breach" + (LevelSync.HostInRun ? " (the host is in a run; start one to join it)." : "."));
+                title.NewGameButton.DoClick();
+            }
         }
 
         // Accepts "192.168.1.20" or "192.168.1.20:27460".

@@ -19,6 +19,7 @@ namespace GungeonOnline
         // What the character looks like right now.
         public int Identity;          // PlayableCharacters (Pilot, Convict, ...)
         public bool AltCostume;
+        public string CustomCharacter = ""; // Custom Characters mod character name, "" for a normal character
         public bool Visible;
         public string Clip = "";      // animation name, e.g. "run_right"
         public int Frame;             // frame within that animation
@@ -293,6 +294,7 @@ namespace GungeonOnline
                         Status = State.Connected;
                         SendRules();
                         SaveSync.SendProgress(false);
+                        LoopSync.SendState(true);
                         LevelSync.OnConnected();
                         Plugin.Log.LogInfo("Connected to " + PeerName + " over " + Link.Kind + "!");
                         break;
@@ -429,6 +431,11 @@ namespace GungeonOnline
                         LootSync.OnWallet(r);
                         break;
 
+                    case MsgType.LoopState:
+                        if (!Link.IsHost)
+                            LoopSync.OnLoopState(r);
+                        break;
+
                     case MsgType.Progress:
                         if (!Link.IsHost)
                             SaveSync.OnProgress(r);
@@ -477,6 +484,7 @@ namespace GungeonOnline
 
             int identity = hasPlayer ? (int)player.characterIdentity : 0;
             bool altCostume = hasPlayer && player.IsUsingAlternateCostume;
+            string customCharacter = CustomCharacterSupport.LocalName(player);
             bool visible = false;
             string clip = "";
             int frame = 0;
@@ -565,6 +573,7 @@ namespace GungeonOnline
                 w.Write(aim.x); w.Write(aim.y);
                 w.Write(identity);
                 w.Write(altCostume);
+                w.Write(customCharacter);
                 w.Write(visible);
                 w.Write(clip);
                 w.Write((byte)Mathf.Clamp(frame, 0, 255));
@@ -622,6 +631,7 @@ namespace GungeonOnline
             Vector2 aim = new Vector2(r.ReadSingle(), r.ReadSingle());
             int identity = r.ReadInt32();
             bool altCostume = r.ReadBoolean();
+            string customCharacter = r.ReadString();
             bool visible = r.ReadBoolean();
             string clip = r.ReadString();
             int frame = r.ReadByte();
@@ -683,6 +693,7 @@ namespace GungeonOnline
             Remote.Aim = aim;
             Remote.Identity = identity;
             Remote.AltCostume = altCostume;
+            Remote.CustomCharacter = customCharacter;
             Remote.Visible = visible;
             Remote.Clip = clip;
             Remote.Frame = frame;

@@ -7,7 +7,8 @@
 # Needs steam_appid.txt (containing 311690) next to EtG.exe, otherwise the game closes itself
 # when it notices it wasn't started by Steam. Steam must still be running.
 # Warning: both copies share the same save files. Stay in the Breach and don't start runs in both.
-param([string]$Name = "")
+# -Test host / -Test join: auto-host on LAN / auto-join 127.0.0.1 once the title screen is up.
+param([string]$Name = "", [string]$Test = "")
 $ErrorActionPreference = "Stop"
 
 $GameDir = "S:\_Games\Steamapps\steamapps\common\Enter the Gungeon"
@@ -32,6 +33,9 @@ $gameArgs = @("--doorstop-enable", "true", "--doorstop-target", "`"$Preloader`""
 if ($Name -ne "") {
     # Both copies share one settings file, so the name for this copy is passed on the command line.
     $gameArgs += @("--gungeon-online-name", "`"$Name`"")
+}
+if ($Test -ne "") {
+    $gameArgs += @("--gungeon-online-test", $Test)
 }
 Start-Process -FilePath "$GameDir\EtG.exe" -WorkingDirectory $GameDir -ArgumentList $gameArgs
 Write-Host "Started copy #$($running + 1) of Enter the Gungeon (Bare profile)$(if ($Name) { " as $Name" })." -ForegroundColor Green

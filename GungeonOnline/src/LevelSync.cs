@@ -32,6 +32,9 @@ namespace GungeonOnline
         private static bool insideQuickRestart;
         private static bool pendingFoyerReturn;   // joiner: host went back to the Breach, follow when possible
         private static bool pendingEndRun;        // joiner: host ended the run, end ours when possible
+        // "Continue" (a saved run) was pressed: its floor load starts a run, so a joiner goes to the host's floor
+        // instead (and still gets their saved character and items back).
+        private static bool continuingSavedRun;
 
         private class LevelInfo
         {
@@ -53,6 +56,19 @@ namespace GungeonOnline
         {
             session = netSession;
             harmony.PatchAll(typeof(LevelSync));
+        }
+
+        // Joiner: the host is in a run right now (we know its floor).
+        public static bool HostInRun
+        {
+            get { return hostLevel != null; }
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(GameManager), "DelayedLoadMidgameSave")]
+        private static void BeforeLoadSavedRun()
+        {
+            continuingSavedRun = true;
         }
 
         // A short id for "which level am I on", so the puppet only shows when both are on the same floor.
@@ -116,8 +132,10 @@ namespace GungeonOnline
         private static void BeforeLoadNextLevel(GameManager __instance)
         {
             insideLoadNextLevel = true;
-            bool startingRun = __instance.IsFoyer || departedFoyer || insideQuickRestart;
+            bool startingRun = __instance.IsFoyer || departedFoyer || insideQuickRestart || continuingSavedRun;
             departedFoyer = false;
+            bool savedRun = continuingSavedRun;
+            continuingSavedRun = false;
             // ReturnToFoyer and LoadCharacterSelect go through LoadNextLevel too. That's not a floor to
             // follow; a second "load level N" made the joiner start two loads at once and hang forever.
             if (insideFoyerReturn)
@@ -131,7 +149,7 @@ namespace GungeonOnline
                 // (No "host has a player" check: during the host's own loading they briefly have none.)
                 if (startingRun && hostLevel != null && !PartnerInBreach)
                 {
-                    Plugin.Log.LogInfo("Starting a run while the host is in one: joining the host's floor (seed " + hostLevel.Seed + ").");
+                    Plugin.Log.LogInfo((savedRun ? "Continuing our saved run" : "Starting a run") + " while the host is in one: joining the host's floor (seed " + hostLevel.Seed + ").");
                     __instance.InitializeForRunWithSeed(hostLevel.Seed);
                     if (hostLevel.Custom.Length > 0)
                         __instance.InjectedLevelName = hostLevel.Custom;
@@ -171,8 +189,9 @@ namespace GungeonOnline
                 return;
             if (IsConnectedJoiner() && !insideFoyerReturn)
                 SaveSync.BeginBorrow();
-            bool startingRun = __instance.IsFoyer || departedFoyer;
+            bool startingRun = __instance.IsFoyer || departedFoyer || continuingSavedRun;
             departedFoyer = false;
+            continuingSavedRun = false;
             if (!IsConnectedHost())
                 return;
             if (startingRun || __instance.CurrentRunSeed == 0)
@@ -298,6 +317,8 @@ namespace GungeonOnline
             // joiner builds the floors from the same progress as we do.
             if (startingRun && follow)
                 SaveSync.SendProgress(true);
+            // Loop The Gungeon: the loop number must arrive before the floor it belongs to.
+            LoopSync.SendState(false);
             hostLevel = new LevelInfo();
             hostLevel.Seed = seed;
             hostLevel.Index = levelIndex;

@@ -393,3 +393,36 @@ BepInEx plugin (loader API) + Steamworks.NET that the game already ships.
   back to our tinted icon. HalfMoney host rule (config Rules/HalfMoney, default on; menu toggle; sent in Rules,
   protocol 24): CurrencyPickup.Pickup prefix halves currencyValue (non-meta) with a carried remainder while in a
   shared run. Load-verified.
+- 0.59/0.60: Custom Characters mod support (CustomCharacterSupport.cs, protocol 25). PlayerState carries the
+  custom character name (CustomCharacter component -> data.nameInternal, e.g. "PlayerThe_Lamb"); receiver looks it
+  up in CustomCharacters.CharacterBuilder.storedCharacters (name -> Tuple<data, prefab>) via reflection and uses
+  that prefab for the puppet and map icon; falls back to the base identity's prefab. Test launch options:
+  launch-test-copy.ps1 -Test host|join (auto LAN host / join 127.0.0.1 from the title screen). Tools take
+  -Index N (copy by start order) via find-game-window.ps1; new key-game.ps1 (SendKeys).
+  Verified with two copies: guest log "Showing partner as custom character PlayerThe_Lamb ... GuideAnimation(Clone)"
+  and screenshot shows the partner as The Lamb.
+- 0.61: Partner puppet gets the game's black outline (SpriteOutlineManager.AddOutlineToSprite once the partner's
+  first frame is set; ApplySheet calls ForceUpdateOutlineMaterial on each outline when the sheet changes). The
+  missing outline made the Lamb look flat/clipped. Verified on two copies (host Marine sees guest Lamb outlined).
+- 0.62–0.66: Loop The Gungeon (Milz 1.1.2) support, LoopSync.cs (protocol 26, LoopState = 35). Loop count is
+  LoopTheGungeon.Plugin.GlobalLoopOffset; TriggerLoop(delay) = ++loop, casing/shrine resets, QuickRestartLite,
+  PerformLoopLoad (SetNextLevelIndex + DelayedLoadNextLevel, so host's LevelSync sends a normal follow LevelLoad).
+  Host sends loop + 7 GunfigManager.Get*PerLoop values on connect, before each LevelLoad, and on change (1 s poll).
+  Joiner: on host loop == ours+1 in a run, calls TriggerLoop with PerformLoopLoad suppressed (prefix false); sets
+  GlobalLoopOffset; Get*PerLoop prefixes return the host's values (ref object __result — verified with a planted
+  value: "redirect check OK"). Set-up is deferred to the first frame because Loop loads after us.
+  Not synced: DPS cap / LOTJ / tax toggles; extra enemies per loop may spawn differently (room-clear backstop).
+  Loop transition itself not yet tested in game.
+- il-dump.ps1: -Dll accepts a full path to another mod's DLL; resolves references from the Bare profile.
+- 0.67/0.68 (protocol 27): Loop The Gungeon, part 2.
+  Options: Gunfig.Value(key) prefix on the joiner answers with the host's value for any Gunfig belonging to
+  Loop (GunfigManager.gunfig or a submenu via _parentGunfig); host sends all _options of those menus (11) in
+  LoopState. Verified with a planted value ("Options redirect check OK").
+  Extra enemies: SpawnCountScaler.SpawnEnemiesWithVariety prefix sets a seed base from run seed + room index +
+  wave (per-room call count) + loop; PickWeightedCandidate pre/postfix InitState(base + pick) and restores
+  Random.state after. Positions still differ (GetRandomAvailableCell, player-relative) -> EnemySync glides.
+  Joiner keeps the host's loop count (Update enforces it; Loop's resume can restore another).
+  Continue: GameManager.DelayedLoadMidgameSave prefix marks the next level load as a run start, so a joiner
+  continuing a saved run goes to the host's floor/seed with their saved character and items.
+  Joining from the title (MultiplayerMenu): joiner waits until connected (+1 s, max 8 s); host in a run and a
+  valid mid-game save -> CONTINUE, else PLAY. Untested in game: loop transition, continue onto host's run.

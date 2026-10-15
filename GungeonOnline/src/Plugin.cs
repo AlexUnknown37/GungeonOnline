@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.58.0";
+        public const string ModVersion = "0.68.0";
 
         public static ManualLogSource Log;
 
@@ -55,6 +55,8 @@ namespace GungeonOnline
             {
                 if (args[i] == "--gungeon-online-name")
                     commandLineName = args[i + 1].Trim();
+                if (args[i] == "--gungeon-online-test")
+                    testStart = args[i + 1].Trim();
             }
 
             session = new NetSession();
@@ -76,8 +78,29 @@ namespace GungeonOnline
             SaveSync.Init(session, harmony);
             SaveSlotLabel.Init(session);
             LootSync.Init(session, harmony);
+            LoopSync.Init(session, harmony);
             PartnerMapMarker.Init(session);
             Log.LogInfo(Name + " " + ModVersion + " loaded. Press " + toggleWindowKey.Value + " in game to open the multiplayer window.");
+        }
+
+        // Testing two copies on one PC: "--gungeon-online-test host" hosts on LAN and "--gungeon-online-test join"
+        // joins 127.0.0.1, both as soon as the title screen is up (then they go into the Breach).
+        private static string testStart = "";
+
+        private void TestStartWhenReady()
+        {
+            if (testStart.Length == 0)
+                return;
+            MainMenuFoyerController title = FindObjectOfType<MainMenuFoyerController>();
+            if (title == null || title.NewGameButton == null || !title.NewGameButton.IsVisible)
+                return;
+            string mode = testStart;
+            testStart = "";
+            Log.LogInfo("Test start: " + mode);
+            bool ok = mode == "host" ? session.HostLan(LanPort.Value)
+                : session.JoinLan(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, LanPort.Value));
+            if (ok)
+                MultiplayerMenu.EnterBreachFromTitle();
         }
 
         // Set from "--gungeon-online-name X" on the command line (for two copies on one PC, which share settings).
@@ -111,6 +134,7 @@ namespace GungeonOnline
             }
 
             session.Update();
+            TestStartWhenReady();
 
             // While playing online the game must keep running when its window isn't focused: otherwise Unity
             // stops completely on tab-out, nothing is sent, and the partner times out. (Keep Running does this
@@ -121,6 +145,7 @@ namespace GungeonOnline
                 Application.runInBackground = true;
             SaveSync.Update();
             LootSync.Update();
+            LoopSync.Update();
             PartnerMapMarker.Update();
             LevelSync.Update();
             DeathSync.Update();

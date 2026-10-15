@@ -14,6 +14,7 @@ namespace GungeonOnline
         private static GameObject marker;
         private static Minimap markerMap;
         private static int markerIdentity = -1;
+        private static string markerCustom = "";
 
         public static void Init(NetSession netSession)
         {
@@ -33,7 +34,7 @@ namespace GungeonOnline
                     marker.SetActive(false);
                 return;
             }
-            if (marker == null || markerMap != map || markerIdentity != session.Remote.Identity)
+            if (marker == null || markerMap != map || markerIdentity != session.Remote.Identity || markerCustom != session.Remote.CustomCharacter)
             {
                 if (marker != null)
                     Object.Destroy(marker);
@@ -42,6 +43,7 @@ namespace GungeonOnline
                     return;
                 markerMap = map;
                 markerIdentity = session.Remote.Identity;
+                markerCustom = session.Remote.CustomCharacter;
             }
             if (!marker.activeSelf)
                 marker.SetActive(true);
@@ -56,8 +58,8 @@ namespace GungeonOnline
             bool own = false;
             try
             {
-                string path = CharacterSelectController.GetCharacterPathFromIdentity((PlayableCharacters)session.Remote.Identity);
-                GameObject prefab = BraveResources.Load(path, ".prefab") as GameObject;
+                string description;
+                GameObject prefab = CustomCharacterSupport.PartnerPrefab(session.Remote, out description);
                 PlayerController template = prefab != null ? prefab.GetComponent<PlayerController>() : null;
                 if (template != null)
                     icon = template.minimapIconPrefab;

@@ -19,6 +19,7 @@ namespace GungeonOnline
         private bool hasShownPartnerFrame;
         private int builtIdentity = -1;
         private bool builtAltCostume;
+        private string builtCustom = "";
         private bool failedToBuild;
         private Material puppetMaterial;
         private Texture puppetTexture;
@@ -61,7 +62,7 @@ namespace GungeonOnline
             }
 
             // Scene loads destroy the puppet (go == null), so it gets rebuilt as needed.
-            if (go == null || remote.Identity != builtIdentity || remote.AltCostume != builtAltCostume)
+            if (go == null || remote.Identity != builtIdentity || remote.AltCostume != builtAltCostume || remote.CustomCharacter != builtCustom)
             {
                 if (!Build(remote))
                 {
@@ -187,6 +188,10 @@ namespace GungeonOnline
                 hasShownPartnerFrame = true;
                 if (sprite.renderer != null)
                     sprite.renderer.enabled = true;
+                // The black outline every player has (ours was stripped from the copy). Added now, from the
+                // partner's frame, so it outlines their character and follows its animation from here on.
+                if (!SpriteOutlineManager.HasOutline(sprite))
+                    SpriteOutlineManager.AddOutlineToSprite(sprite, Color.black);
             }
         }
 
@@ -220,6 +225,16 @@ namespace GungeonOnline
             texture = sheet;
             s.usesOverrideMaterial = true;
             r.sharedMaterial = forSheet;
+            // The outline draws from the same sheet; point it at the new one too.
+            tk2dSprite[] outlines = SpriteOutlineManager.GetOutlineSprites(s);
+            if (outlines != null)
+            {
+                foreach (tk2dSprite o in outlines)
+                {
+                    if (o != null)
+                        SpriteOutlineManager.ForceUpdateOutlineMaterial(o, s);
+                }
+            }
         }
 
         // Shows the partner's gun at the position and angle their game reports, relative to the puppet's feet.
@@ -289,10 +304,12 @@ namespace GungeonOnline
             Destroy();
             builtIdentity = remote.Identity;
             builtAltCostume = remote.AltCostume;
+            builtCustom = remote.CustomCharacter;
 
-            // The partner's animations come from their character's prefab...
-            string path = CharacterSelectController.GetCharacterPathFromIdentity((PlayableCharacters)remote.Identity);
-            GameObject prefab = BraveResources.Load(path, ".prefab") as GameObject;
+            // The partner's animations come from their character's prefab (a Custom Characters character's own
+            // prefab when we have that mod too)...
+            string path;
+            GameObject prefab = CustomCharacterSupport.PartnerPrefab(remote, out path);
             PlayerController template = prefab != null ? prefab.GetComponent<PlayerController>() : null;
             // ...and the drawing setup comes from our own live player.
             PlayerController local = GameManager.Instance.PrimaryPlayer;

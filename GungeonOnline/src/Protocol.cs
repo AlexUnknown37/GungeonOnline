@@ -39,13 +39,14 @@ namespace GungeonOnline
         GunTaken = 32,   // we picked up a dropped gun: the partner's copy goes away
         ShopItemGone = 33, // we bought/stole a shop item: sold out for the partner too
         Wallet = 34,     // our money/keys changed by this much: the shared purse changes for the partner too
+        LoopState = 35,  // host -> joiner: Loop The Gungeon's loop number and difficulty settings
         Progress = 28,   // host -> joiner: one part of the host's save progress (floors are built from it)
     }
 
     public static class Protocol
     {
         // Bump this whenever the packet format changes, so old and new versions refuse to talk.
-        public const int Version = 24;
+        public const int Version = 27;
         public const int Channel = 0;
         public const int MaxPlayers = 2;
 
