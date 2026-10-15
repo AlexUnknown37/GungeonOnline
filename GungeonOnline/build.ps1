@@ -31,7 +31,7 @@ $version = "$($parts[0]).$([int]$parts[1] + 1).0"
 New-Item -ItemType Directory -Force $BinDir, $DistDir | Out-Null
 
 # The game runs an old Mono (.NET 3.5), so compile against the game's own mscorlib/System DLLs.
-$refs = @("mscorlib.dll", "System.dll", "System.Core.dll", "Assembly-CSharp.dll", "Assembly-CSharp-firstpass.dll") |
+$refs = @("mscorlib.dll", "System.dll", "System.Core.dll", "Assembly-CSharp.dll", "Assembly-CSharp-firstpass.dll", "PlayMaker.dll") |
     ForEach-Object { "/reference:$GameManaged\$_" }
 $refs += Get-ChildItem "$GameManaged\UnityEngine*.dll" | Where-Object { $_.Name -notlike "*.mm.dll" } | ForEach-Object { "/reference:$($_.FullName)" }
 $refs += "/reference:$BepInExCore\BepInEx.dll", "/reference:$BepInExCore\0Harmony.dll"

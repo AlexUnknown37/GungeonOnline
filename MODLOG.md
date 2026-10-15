@@ -426,3 +426,30 @@ BepInEx plugin (loader API) + Steamworks.NET that the game already ships.
   continuing a saved run goes to the host's floor/seed with their saved character and items.
   Joining from the title (MultiplayerMenu): joiner waits until connected (+1 s, max 8 s); host in a run and a
   valid mid-game save -> CONTINUE, else PLAY. Untested in game: loop transition, continue onto host's run.
+- 0.69/0.70: Real Steam test (guest = long save): seed + borrow worked but the floor still differed (guest's
+  F1 needed 4 generation attempts; boss pool BulletKing/GatlingGull). Some code reads progress data directly.
+  SaveSync now SWAPS GameStatsManager.m_instance to the host copy while a floor builds (our session fields lent
+  to it); 22 write methods redirect to our real instance only (MirrorWrite/MirrorWriteVoid; void methods can't
+  take __result — 0.69 failed to patch them AND broke Loop's patching, never ship 0.69); GameStatsManager.Save
+  swaps ours back in for the save; quitting ends the borrow. RoomCleared sent once per room per floor (log
+  showed 35+ repeats for one room). Breach freeze: log was overwritten, cause unknown.
+- 0.71 (protocol 28): Chest re-roll was a no-op: DetermineContents falls back to RewardManager's seeded floor
+  manifest (PregeneratedChestContents) -> partner got the same item. Receiver now sets contents from
+  Chest.GenerateContents(player, 0, new System.Random(own)). OrbitalSync.cs: player.orbitals + trailOrbitals
+  sprites (collection name, sprite id, pos, height, flip, angle) at 10 Hz unreliable (Orbitals = 36); receiver
+  draws CloneStrippedSprite copies, collections found via Resources.FindObjectsOfTypeAll. InventorySync.cs:
+  joiner sends its inventory snapshot (guns+ammo, passives, actives, health/max/armor, blanks, run seed) on
+  change every 2 s (37); host remembers per PeerName; joiner starting onto the host's run (not via Continue)
+  sends InventoryRequest (38); host replies InventoryRestore (39) if same run seed; joiner adds missing guns
+  (AddGunToInventory) + items (GivePrefabToPlayer), sets health/armor/blanks. Load-verified only.
+- 0.72: BreachCultist.cs. Online (session.Link != null): FoyerCharacterSelectFlag.Update prefix keeps the coop
+  character (Cultist) shown (normally hidden with no controller); ChangeCoopMode.OnEnter prefix: IsTestCoopValid
+  -> fire IfCoopValidEvent; TargetCoopMode -> run a ChangeToNewCharacter (PlayerPrefabPath copied, Init(State),
+  OnEnter) so WE become the Cultist; leaving coop -> Finish. build.ps1 now references PlayMaker.dll.
+  Verified: Cultist visible in the Breach while hosting. Selecting him not verified (mouse automation in the
+  Breach character select didn't land on him).
+- 0.73–0.76: Cultist in the character-select screen. Foyer.SetUpCharacterCallbacks prefix (online): coop flag ->
+  IsCoopCharacter=false, CharacterPrefabPath=PlayerCoopCultist, shown; it lacked an OverheadElement (borrowed
+  from another flag; CreateOverheadElement postfix relabels "The Cultist", hides other labels/sprites) and a
+  CharacterSelectIdleDoer (the mouse hover reads its sprite -> NullReferenceException in HandleCharacterSelect;
+  added one, disabled). Verified: selected the Cultist and spawned as PlayerCoopCultist(Clone).

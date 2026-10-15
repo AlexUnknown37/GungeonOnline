@@ -66,6 +66,7 @@ namespace GungeonOnline
             killQueue.Clear();
             queuedAt.Clear();
             corrections.Clear();
+            clearedSent.Clear();
         }
 
         // ---- IDs ----
@@ -404,6 +405,8 @@ namespace GungeonOnline
         // never gets its "died" message and stays alive in one game). As a backstop: when a room opens
         // because it was cleared, the other game removes whatever is left in that room and opens it too.
         private static bool applyingRemoteRoom;
+        // Each room's "cleared" is sent once per floor (a room that kept re-opening sent it dozens of times).
+        private static readonly HashSet<int> clearedSent = new HashSet<int>();
 
         [HarmonyPostfix]
         [HarmonyPatch(typeof(RoomHandler), "UnsealRoom")]
@@ -413,8 +416,9 @@ namespace GungeonOnline
                 return;
             if (__instance.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear))
                 return;
+            CheckFloor();
             int roomIndex = GameManager.Instance.Dungeon.data.rooms.IndexOf(__instance);
-            if (roomIndex < 0)
+            if (roomIndex < 0 || !clearedSent.Add(roomIndex))
                 return;
             string level = LevelSync.CurrentLevelKey();
             session.SendReliable(MsgType.RoomCleared, delegate (BinaryWriter w)

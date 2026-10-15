@@ -108,9 +108,11 @@ namespace GungeonOnline
                 return;
 
             bool mimic = chestMimicField != null && (bool)chestMimicField.GetValue(chest);
-            // Our own roll: forget the contents decided when the floor was built (same as the partner's).
+            // Our own roll. The game decides every chest's contents when the floor is built, from the shared seed
+            // (RewardManager's floor manifest), so just clearing them got the partner's item again. Roll new
+            // contents with our own random numbers instead.
             if (!mimic)
-                chest.contents = null;
+                RerollChest(chest, me);
             Plugin.Log.LogInfo("Partner opened a chest: opening ours too (own contents).");
             applyingRemote = true;
             try
@@ -127,6 +129,29 @@ namespace GungeonOnline
             // Not in that room: go there, so our loot isn't left behind on the floor.
             if (!me.IsGhost && !me.healthHaver.IsDead && me.CurrentRoom != RoomAt(pos))
                 PlayerWarp.TeleportToPartner();
+        }
+
+        private static readonly MethodInfo generateContents = AccessTools.Method(typeof(Chest), "GenerateContents");
+        private static readonly System.Random ownRandom = new System.Random();
+
+        private static void RerollChest(Chest chest, PlayerController me)
+        {
+            try
+            {
+                List<PickupObject> rolled = generateContents != null
+                    ? generateContents.Invoke(chest, new object[] { me, 0, new System.Random(ownRandom.Next()) }) as List<PickupObject>
+                    : null;
+                if (rolled != null && rolled.Count > 0)
+                {
+                    chest.contents = rolled;
+                    return;
+                }
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Couldn't roll our own chest contents: " + e.Message);
+            }
+            chest.contents = null;
         }
 
         // ---- Master Round ----

@@ -150,6 +150,7 @@ namespace GungeonOnline
                 if (startingRun && hostLevel != null && !PartnerInBreach)
                 {
                     Plugin.Log.LogInfo((savedRun ? "Continuing our saved run" : "Starting a run") + " while the host is in one: joining the host's floor (seed " + hostLevel.Seed + ").");
+                    InventorySync.OnJoinedHostRun(savedRun);
                     __instance.InitializeForRunWithSeed(hostLevel.Seed);
                     if (hostLevel.Custom.Length > 0)
                         __instance.InjectedLevelName = hostLevel.Custom;

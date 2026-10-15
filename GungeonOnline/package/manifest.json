@@ -1,6 +1,6 @@
 {
   "name": "Gungeon_Online",
-  "version_number": "0.68.0",
+  "version_number": "0.76.0",
   "website_url": "",
   "description": "Online co-op for Enter the Gungeon over Steam or LAN. Early prototype: host, invite or join a friend, and see each other's position.",
   "dependencies": [

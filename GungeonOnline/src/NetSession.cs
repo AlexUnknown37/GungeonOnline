@@ -436,6 +436,25 @@ namespace GungeonOnline
                             LoopSync.OnLoopState(r);
                         break;
 
+                    case MsgType.Orbitals:
+                        OrbitalSync.OnOrbitals(r);
+                        break;
+
+                    case MsgType.Inventory:
+                        if (Link.IsHost)
+                            InventorySync.OnInventory(r);
+                        break;
+
+                    case MsgType.InventoryRequest:
+                        if (Link.IsHost)
+                            InventorySync.OnInventoryRequest(r);
+                        break;
+
+                    case MsgType.InventoryRestore:
+                        if (!Link.IsHost)
+                            InventorySync.OnInventoryRestore(r);
+                        break;
+
                     case MsgType.Progress:
                         if (!Link.IsHost)
                             SaveSync.OnProgress(r);

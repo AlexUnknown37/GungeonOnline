@@ -40,13 +40,17 @@ namespace GungeonOnline
         ShopItemGone = 33, // we bought/stole a shop item: sold out for the partner too
         Wallet = 34,     // our money/keys changed by this much: the shared purse changes for the partner too
         LoopState = 35,  // host -> joiner: Loop The Gungeon's loop number and difficulty settings
+        Orbitals = 36,   // what floats around our player (Guon Stones...) and where: the partner draws copies
+        Inventory = 37,  // joiner -> host: what we carry (the host remembers it for a rejoin)
+        InventoryRequest = 38, // joiner -> host: we're back on your run, do you remember our items?
+        InventoryRestore = 39, // host -> joiner: your items from before
         Progress = 28,   // host -> joiner: one part of the host's save progress (floors are built from it)
     }
 
     public static class Protocol
     {
         // Bump this whenever the packet format changes, so old and new versions refuse to talk.
-        public const int Version = 27;
+        public const int Version = 28;
         public const int Channel = 0;
         public const int MaxPlayers = 2;
 

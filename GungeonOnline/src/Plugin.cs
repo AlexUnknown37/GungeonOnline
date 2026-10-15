@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.68.0";
+        public const string ModVersion = "0.76.0";
 
         public static ManualLogSource Log;
 
@@ -79,6 +79,9 @@ namespace GungeonOnline
             SaveSlotLabel.Init(session);
             LootSync.Init(session, harmony);
             LoopSync.Init(session, harmony);
+            OrbitalSync.Init(session);
+            BreachCultist.Init(session, harmony);
+            InventorySync.Init(session);
             PartnerMapMarker.Init(session);
             Log.LogInfo(Name + " " + ModVersion + " loaded. Press " + toggleWindowKey.Value + " in game to open the multiplayer window.");
         }
@@ -146,6 +149,8 @@ namespace GungeonOnline
             SaveSync.Update();
             LootSync.Update();
             LoopSync.Update();
+            OrbitalSync.Update();
+            InventorySync.Update();
             PartnerMapMarker.Update();
             LevelSync.Update();
             DeathSync.Update();
@@ -185,6 +190,7 @@ namespace GungeonOnline
 
         private void OnApplicationQuit()
         {
+            SaveSync.EndBorrow("game closing"); // never quit with the host's progress in place
             session.Leave();
             session.Discovery.Stop();
         }

@@ -115,13 +115,140 @@ namespace GungeonOnline
                 }
             }
             Plugin.Log.LogInfo("Save sync: watching " + patched + " progress reads.");
+
+            // Writes made while the host's copy stands in for ours also go to our real progress.
+            HarmonyMethod mirror = new HarmonyMethod(typeof(SaveSync), "MirrorWrite");
+            HarmonyMethod mirrorVoid = new HarmonyMethod(typeof(SaveSync), "MirrorWriteVoid");
+            int mirrored = 0;
+            foreach (MethodInfo m in typeof(GameStatsManager).GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            {
+                if (Array.IndexOf(WriteMethods, m.Name) < 0)
+                    continue;
+                try
+                {
+                    harmony.Patch(m, m.ReturnType == typeof(void) ? mirrorVoid : mirror);
+                    mirrored++;
+                }
+                catch (Exception e)
+                {
+                    Plugin.Log.LogError("Save sync: couldn't patch GameStatsManager." + m.Name + ": " + e.Message);
+                }
+            }
+            // Saving while swapped must save OUR progress.
+            MethodInfo save = AccessTools.Method(typeof(GameStatsManager), "Save");
+            if (save != null)
+                harmony.Patch(save, new HarmonyMethod(typeof(SaveSync), "BeforeSave"), new HarmonyMethod(typeof(SaveSync), "AfterSave"));
+            Plugin.Log.LogInfo("Save sync: " + mirrored + " progress writes kept for our own save.");
+        }
+
+        // Everything that changes progress. While the host's copy stands in, each one also runs on our real progress.
+        private static readonly string[] WriteMethods =
+        {
+            "SetFlag", "SetCharacterSpecificFlag", "SetStat", "RegisterStatChange", "UpdateMaximum",
+            "HandleEncounteredObject", "HandleEncounteredObjectRaw", "HandleEncounteredRoom", "HandleEncounteredSynergy",
+            "EncounterFlow", "ForceUnlock", "SetPersistentStringLastIndex", "SetEncounterableDifferentiator",
+            "SingleIncrementDifferentiator", "MarkEncounterableAnnounced", "SetNextFlag", "ClearStatValueGlobal",
+            "BeginNewSession", "EndSession", "AssignMidGameSavedSessionStats", "MoveSessionStatsToSavedSessionStats",
+        };
+
+        // ---- Swapping: the host's copy IS the game's progress while a floor is built ----
+        // Redirecting reads (above) missed code that reads the progress data directly, so a further-along save
+        // still changed the floor. While a floor is built, GameStatsManager.Instance now returns the host's copy
+        // itself. Our own run state (session) is lent to it, and every write also reaches our real progress.
+
+        private static readonly FieldInfo instanceField = AccessTools.Field(typeof(GameStatsManager), "m_instance");
+        private static readonly string[] SessionFields =
+        {
+            "m_sessionStats", "m_savedSessionStats", "m_sessionCharacter", "m_sessionSynergies", "isTurboMode",
+            "isChump", "rainbowRunToggled", "midGameSaveGuid", "CurrentRobotArmFloor", "CurrentEeveeEquipSeed",
+            "CurrentResRatShopSeed", "AccumulatedBeetleMerchantChance", "AccumulatedUsedBeetleMerchantChance",
+            "CurrentAccumulatedGunderfuryExperience", "NumberRunsValidCellWithoutSpawn",
+        };
+        private static GameStatsManager realInstance;
+        private static bool inMirror;
+
+        private static bool Swapped
+        {
+            get { return realInstance != null; }
+        }
+
+        private static void CopySession(GameStatsManager from, GameStatsManager to)
+        {
+            foreach (string name in SessionFields)
+            {
+                FieldInfo f = AccessTools.Field(typeof(GameStatsManager), name);
+                if (f != null)
+                    f.SetValue(to, f.GetValue(from));
+            }
+        }
+
+        private static void SwapIn()
+        {
+            if (Swapped || hostCopy == null || instanceField == null || !GameStatsManager.HasInstance)
+                return;
+            realInstance = GameStatsManager.Instance;
+            CopySession(realInstance, hostCopy);
+            instanceField.SetValue(null, hostCopy);
+        }
+
+        private static void SwapOut()
+        {
+            if (!Swapped)
+                return;
+            // Session changes made meanwhile (a run starting) went to both; take ours back as the truth.
+            instanceField.SetValue(null, realInstance);
+            realInstance = null;
+        }
+
+        // A write while swapped goes to our REAL progress only (so nothing earned is lost and nothing counts
+        // twice); the host's copy stays exactly the host's. Our run state (session) is then lent to it again.
+        private static bool MirrorWriteVoid(GameStatsManager __instance, MethodBase __originalMethod, object[] __args)
+        {
+            object ignored = null;
+            return MirrorWrite(__instance, __originalMethod, __args, ref ignored);
+        }
+
+        private static bool MirrorWrite(GameStatsManager __instance, MethodBase __originalMethod, object[] __args, ref object __result)
+        {
+            if (!Swapped || inMirror || !ReferenceEquals(__instance, hostCopy))
+                return true;
+            inMirror = true;
+            try
+            {
+                __result = __originalMethod.Invoke(realInstance, __args);
+                CopySession(realInstance, hostCopy);
+                return false;
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("Save sync: couldn't keep " + __originalMethod.Name + " for our save: " + e.Message);
+                return true;
+            }
+            finally
+            {
+                inMirror = false;
+            }
+        }
+
+        private static void BeforeSave(out bool __state)
+        {
+            __state = Swapped;
+            if (__state)
+                instanceField.SetValue(null, realInstance);
+        }
+
+        private static void AfterSave(bool __state)
+        {
+            if (__state && Swapped)
+                instanceField.SetValue(null, hostCopy);
         }
 
         // While borrowing, a read on the joiner's real progress is answered by the host's copy instead.
         // (Calling it on the host's copy comes back through here with __instance == hostCopy and runs normally.)
         private static bool RedirectRead(GameStatsManager __instance, MethodBase __originalMethod, object[] __args, ref object __result)
         {
-            if (!borrowing || hostCopy == null || ReferenceEquals(__instance, hostCopy))
+            // (Not for reads that a write on our real progress makes for itself.)
+            if (!borrowing || inMirror || hostCopy == null || ReferenceEquals(__instance, hostCopy))
                 return true;
             try
             {
@@ -250,6 +377,7 @@ namespace GungeonOnline
             if (!borrowing)
                 Plugin.Log.LogInfo("Save sync: building this floor from the host's progress.");
             borrowing = true;
+            SwapIn();
             borrowStartedAt = Time.realtimeSinceStartup;
             loadDoneAt = -1f;
             dungeonAtStart = GameManager.HasInstance ? GameManager.Instance.Dungeon : null;
@@ -260,6 +388,7 @@ namespace GungeonOnline
             if (!borrowing)
                 return;
             borrowing = false;
+            SwapOut();
             Plugin.Log.LogInfo("Save sync: back to our own progress (" + why + ").");
             if (pendingCopy != null)
             {
