@@ -1,6 +1,7 @@
 using System.Collections;
 using System.IO;
 using System.Reflection;
+using Dungeonator;
 using HarmonyLib;
 using UnityEngine;
 
@@ -157,6 +158,9 @@ namespace GungeonOnline
 
         // ---- Coming back from a chest ----
 
+        // The last chest used to revive the partner (it gives no loot, so it isn't "opened" for them).
+        public static Chest ReviveChest;
+
         // Opening a normal chest while the partner is a ghost: it brings them back instead of giving loot,
         // like the game's co-op chests.
         [HarmonyPrefix]
@@ -169,28 +173,49 @@ namespace GungeonOnline
                 return true;
 
             __instance.IsOpen = true;
+            ReviveChest = __instance;
             if (__instance.spriteAnimator != null && !string.IsNullOrEmpty(__instance.openAnimName))
                 __instance.spriteAnimator.Play(__instance.openAnimName);
             Vector2 at = __instance.sprite != null ? __instance.sprite.WorldBottomCenter : (Vector2)__instance.transform.position;
             Plugin.Log.LogInfo("Opened a chest while our partner is a ghost: bringing them back at " + at);
+            SendRevive(at, false);
+            return false;
+        }
+
+        // Beating a floor boss while the partner is a ghost brings them back, like the game's local co-op does.
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(RoomHandler), "HandleBossClearReward")]
+        private static void AfterBossClearReward()
+        {
+            PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+            if (!PartnerIsGhost || me == null || me.IsGhost || me.healthHaver.IsDead)
+                return;
+            Plugin.Log.LogInfo("Boss beaten while our partner is a ghost: bringing them back.");
+            SendRevive(me.CenterPosition, true);
+        }
+
+        private static void SendRevive(Vector2 at, bool fromBoss)
+        {
             session.SendReliable(MsgType.Revive, delegate (BinaryWriter w)
             {
                 w.Write(at.x);
                 w.Write(at.y);
+                w.Write(fromBoss);
             });
-            return false;
         }
 
         public static void OnRevive(BinaryReader r)
         {
             Vector2 at = new Vector2(r.ReadSingle(), r.ReadSingle());
+            bool fromBoss = r.ReadBoolean();
             if (!GameManager.HasInstance)
                 return;
             PlayerController p = GameManager.Instance.PrimaryPlayer;
             if (p == null || !p.IsGhost)
                 return;
-            Plugin.Log.LogInfo("Partner opened a chest: coming back to life.");
-            OpenChestNear(at);
+            Plugin.Log.LogInfo(fromBoss ? "Partner beat the boss: coming back to life." : "Partner opened a chest: coming back to life.");
+            if (!fromBoss)
+                OpenChestNear(at);
             p.ResurrectFromChest(at);
             p.StartCoroutine(FinishRevive(p));
         }

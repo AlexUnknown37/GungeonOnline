@@ -125,6 +125,8 @@ namespace GungeonOnline
 
             if (IsConnectedJoiner())
             {
+                // Build this floor from the host's save progress so it comes out the same as theirs.
+                SaveSync.BeginBorrow();
                 // Starting a run while the host is in one: start on the host's run instead of our own.
                 // (No "host has a player" check: during the host's own loading they briefly have none.)
                 if (startingRun && hostLevel != null && !PartnerInBreach)
@@ -167,6 +169,8 @@ namespace GungeonOnline
             // LoadNextLevel calls this itself for injected levels; that was already reported.
             if (insideLoadNextLevel)
                 return;
+            if (IsConnectedJoiner() && !insideFoyerReturn)
+                SaveSync.BeginBorrow();
             bool startingRun = __instance.IsFoyer || departedFoyer;
             departedFoyer = false;
             if (!IsConnectedHost())
@@ -290,6 +294,10 @@ namespace GungeonOnline
         // follow = false: just let the joiner know where we are (their next run start joins us).
         private static void SendLevelLoad(int seed, int levelIndex, string customLevel, bool startingRun, bool follow)
         {
+            // A new run: send our latest save progress first (reliable messages arrive in order), so the
+            // joiner builds the floors from the same progress as we do.
+            if (startingRun && follow)
+                SaveSync.SendProgress(true);
             hostLevel = new LevelInfo();
             hostLevel.Seed = seed;
             hostLevel.Index = levelIndex;

@@ -62,7 +62,10 @@ namespace GungeonOnline
 
         private const float StateSendInterval = 1f / 30f; // 30 times a second
         private const float PingInterval = 1f;
-        private const float Timeout = 10f;
+        private const float Timeout = 20f;       // silence (not counting our own loading) before giving up
+        private const float HelloRetry = 2f;     // reconnecting joiner: hello every 2 s
+        private float lastUpdateAt;
+        private float nextHelloAt;
 
         public readonly RemotePlayerState Remote = new RemotePlayerState();
         public readonly LanDiscovery Discovery = new LanDiscovery();
@@ -84,13 +87,27 @@ namespace GungeonOnline
             }
         }
 
+        // Lobby rule set by the host: money pickups count half while online (the purse is shared and both
+        // games drop money for the same kills, so full value would earn about twice a solo run).
+        private bool joinerHalfMoney = true;
+        public bool HalfMoney
+        {
+            get
+            {
+                if (Link == null)
+                    return false;
+                return Link.IsHost ? Plugin.HalfMoney.Value : joinerHalfMoney;
+            }
+        }
+
         // Host: tell the partner the current rules (on connect and whenever they change).
         public void SendRules()
         {
             if (Link == null || !Link.IsHost)
                 return;
             bool pvp = Plugin.Pvp.Value;
-            SendReliable(MsgType.Rules, delegate (BinaryWriter w) { w.Write(pvp); });
+            bool halfMoney = Plugin.HalfMoney.Value;
+            SendReliable(MsgType.Rules, delegate (BinaryWriter w) { w.Write(pvp); w.Write(halfMoney); });
         }
 
         // The link in use right now, or null when offline.
@@ -118,6 +135,8 @@ namespace GungeonOnline
                 Use(Steam);
                 if (lobby.IsHost)
                     Status = State.WaitingForPartner;
+                else
+                    MultiplayerMenu.EnterBreachFromTitle(); // accepted an invite on the title screen
             };
             Steam = new SteamLink(lobby);
         }
@@ -194,10 +213,25 @@ namespace GungeonOnline
                 return;
 
             float now = Time.realtimeSinceStartup;
+
+            // Loading a floor freezes the game for several seconds. That silence isn't the partner being gone:
+            // don't count time while we're loading, or a long gap between frames (our own freeze).
+            bool loading = GameManager.HasInstance && GameManager.Instance.IsLoadingLevel;
+            if (loading || now - lastUpdateAt > 1f)
+                lastReceivedAt += now - lastUpdateAt;
+            lastUpdateAt = now;
+            // The partner's own load also goes quiet; allow extra time right after either of us loaded.
             if (now - lastReceivedAt > Timeout)
             {
                 Disconnect("timed out");
                 return;
+            }
+
+            // A Steam joiner that lost contact stays in the lobby and keeps saying hello until the host answers.
+            if (Status == State.Connecting && Link != null && !Link.IsHost && now >= nextHelloAt)
+            {
+                nextHelloAt = now + HelloRetry;
+                SendHello();
             }
 
             if (Status != State.Connected)
@@ -252,10 +286,13 @@ namespace GungeonOnline
                             Disconnect("version mismatch");
                             return;
                         }
-                        if (!sentHello)
+                        // The host answers every hello: a joiner reconnecting after a timeout needs the reply even
+                        // if the host never noticed the gap.
+                        if (!sentHello || Link.IsHost)
                             SendHello();
                         Status = State.Connected;
                         SendRules();
+                        SaveSync.SendProgress(false);
                         LevelSync.OnConnected();
                         Plugin.Log.LogInfo("Connected to " + PeerName + " over " + Link.Kind + "!");
                         break;
@@ -302,7 +339,8 @@ namespace GungeonOnline
                         if (!Link.IsHost)
                         {
                             joinerPvp = r.ReadBoolean();
-                            Plugin.Log.LogInfo("Host rules: PvP " + (joinerPvp ? "on" : "off"));
+                            joinerHalfMoney = r.ReadBoolean();
+                            Plugin.Log.LogInfo("Host rules: PvP " + (joinerPvp ? "on" : "off") + ", half money " + (joinerHalfMoney ? "on" : "off"));
                         }
                         break;
                     case MsgType.EnemyDamage:
@@ -366,6 +404,35 @@ namespace GungeonOnline
                         BulletSync.OnShot(r);
                         break;
 
+
+                    case MsgType.ChestOpened:
+                        LootSync.OnChestOpened(r);
+                        break;
+
+                    case MsgType.HitInRoom:
+                        LootSync.OnHitInRoom(r);
+                        break;
+
+                    case MsgType.GunDropped:
+                        LootSync.OnGunDropped(r);
+                        break;
+
+                    case MsgType.GunTaken:
+                        LootSync.OnGunTaken(r);
+                        break;
+
+                    case MsgType.ShopItemGone:
+                        LootSync.OnShopItemGone(r);
+                        break;
+
+                    case MsgType.Wallet:
+                        LootSync.OnWallet(r);
+                        break;
+
+                    case MsgType.Progress:
+                        if (!Link.IsHost)
+                            SaveSync.OnProgress(r);
+                        break;
 
                     case MsgType.ReturnToFoyer:
                         if (!Link.IsHost)
@@ -657,6 +724,20 @@ namespace GungeonOnline
             if (Link == null)
                 return;
             Plugin.Log.LogWarning("Disconnected: " + reason);
+
+            // Steam joiner, still in the lobby: keep trying instead of leaving (needed a new invite before).
+            // The run's seed is kept so the next floor still matches when the connection comes back.
+            if (!Link.IsHost && Link == Steam && Steam.Lobby.InLobby && reason == "timed out")
+            {
+                Plugin.Log.LogInfo("Staying in the lobby and trying to reconnect...");
+                PingMs = -1f;
+                sentHello = false;
+                Status = State.Connecting;
+                lastReceivedAt = Time.realtimeSinceStartup;
+                nextHelloAt = 0f;
+                return;
+            }
+
             ResetPeer();
             // A host keeps its lobby / port open so the friend can come back; a joiner leaves.
             if (Link.IsHost)

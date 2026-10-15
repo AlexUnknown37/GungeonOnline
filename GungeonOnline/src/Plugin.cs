@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.43.0";
+        public const string ModVersion = "0.58.0";
 
         public static ManualLogSource Log;
 
@@ -24,6 +24,7 @@ namespace GungeonOnline
         public static ConfigEntry<int> LanPort;
         public static ConfigEntry<string> LastLanAddress;
         public static ConfigEntry<bool> Pvp;
+        public static ConfigEntry<bool> HalfMoney;
         private ConfigEntry<KeyCode> toggleWindowKey;
 
         private NetSession session;
@@ -45,6 +46,9 @@ namespace GungeonOnline
                 "The last LAN address you joined (filled in automatically).");
             Pvp = Config.Bind("Rules", "PvP", false,
                 "When you host: players' bullets can hurt each other. Joiners follow the host's setting.");
+            HalfMoney = Config.Bind("Rules", "HalfMoney", true,
+                "When you host: money pickups count half online. The purse is shared and both games drop money, " +
+                "so this keeps a run's income close to solo. Joiners follow the host's setting.");
 
             string[] args = Environment.GetCommandLineArgs();
             for (int i = 0; i < args.Length - 1; i++)
@@ -62,11 +66,17 @@ namespace GungeonOnline
             EnemySync.Init(session, harmony);
             ThrowSync.Init(session, harmony);
             BlankSync.Init(session, harmony);
+            MenuButtons.Init(harmony);
+            MultiplayerMenu.Init(session);
             PauseSync.Init(session);
             WorldSync.Init(session, harmony);
             PetSync.Init(session, petPuppet);
             TargetSync.Init(session, harmony);
             PlayerWarp.Init(session);
+            SaveSync.Init(session, harmony);
+            SaveSlotLabel.Init(session);
+            LootSync.Init(session, harmony);
+            PartnerMapMarker.Init(session);
             Log.LogInfo(Name + " " + ModVersion + " loaded. Press " + toggleWindowKey.Value + " in game to open the multiplayer window.");
         }
 
@@ -101,9 +111,23 @@ namespace GungeonOnline
             }
 
             session.Update();
+
+            // While playing online the game must keep running when its window isn't focused: otherwise Unity
+            // stops completely on tab-out, nothing is sent, and the partner times out. (Keep Running does this
+            // too, but players may not have it.) The game's own pause-on-tab-out still happens unless Keep
+            // Running is installed; then Pause Sync freezes both games, like local co-op.
+            bool online = session.Status == NetSession.State.Connected || session.Status == NetSession.State.Connecting;
+            if (online && !Application.runInBackground)
+                Application.runInBackground = true;
+            SaveSync.Update();
+            LootSync.Update();
+            PartnerMapMarker.Update();
             LevelSync.Update();
             DeathSync.Update();
             PauseSync.Update();
+            MultiplayerMenu.Update();
+            if (steamChecked)
+                SteamFriendsList.UpdateOwnPresence(session);
             WorldSync.Update();
             EnemySync.Update();
             TargetSync.Update();
@@ -113,9 +137,25 @@ namespace GungeonOnline
             PetSync.Update();
         }
 
+        private GameCursorController gameCursor;
+
         private void OnGUI()
         {
+            // Draw above the game's own on-screen UI.
+            GUI.depth = -1000;
+            SaveSlotLabel.Draw();
             window.Draw();
+            MultiplayerMenu.Draw();
+
+            // The game draws its cursor the same way, so our panels covered it. While one is open, draw the
+            // game's own cursor again on top of them.
+            if ((MultiplayerMenu.IsOpen || window.Visible || SaveSlotLabel.IsListOpen) && Event.current.type == EventType.Repaint)
+            {
+                if (gameCursor == null)
+                    gameCursor = FindObjectOfType<GameCursorController>();
+                if (gameCursor != null)
+                    gameCursor.DrawCursor();
+            }
         }
 
         private void OnApplicationQuit()

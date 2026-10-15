@@ -191,6 +191,19 @@ namespace GungeonOnline
                 ApplyRemoteDamage(a, KillHealth);
         }
 
+        // The game refuses a killing blow on a boss while the (single-player) player is dead, so a host who was
+        // a ghost could never kill the boss the guest had killed (it kept trying). Damage from the partner's
+        // game is always allowed through.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(HealthHaver), "BossHealthSanityCheck")]
+        private static bool BeforeBossHealthSanityCheck(ref bool __result)
+        {
+            if (!applyingRemote)
+                return true;
+            __result = true;
+            return false;
+        }
+
         private static void ApplyRemoteDamage(AIActor a, float amount)
         {
             applyingRemote = true;

@@ -8,7 +8,7 @@ namespace GungeonOnline
     // Also draws a name tag where the other player is standing.
     public class DebugWindow
     {
-        public bool Visible = true;
+        public bool Visible = false; // backup/debug window; the real menu is MULTIPLAYER in the game menus
 
         private readonly NetSession session;
         private readonly RemotePuppet puppet;

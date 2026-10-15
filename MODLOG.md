@@ -319,6 +319,25 @@ BepInEx plugin (loader API) + Steamworks.NET that the game already ships.
   Break(Vector2) (already patched); there's also a separate Break() with its own body. 0.43.0: also patch Break();
   log every break sent ("Broke ... telling partner") and every miss on receipt (closest candidate name + distance).
   Load-verified.
+- 2026-10-15 FIRST REAL STEAM TEST (two PCs, 0.43.0): Steam lobby + P2P connect works; pet, pause, breakables,
+  ghosts, room clears, game over, EndRun all seen working in logs. Breakable misses were only already-broken copies.
+  Problems: (1) friend had no Keep Running → Unity stops on tab-out → "timed out"; (2) every host new run →
+  joiner "partner left the lobby": both games freeze while generating the floor (>10 s silence) → joiner timed out
+  and LEFT the Steam lobby. 0.44.0: timeout 20 s and time spent loading / frame gaps > 1 s don't count; a Steam
+  joiner that times out stays in the lobby (Status Connecting, re-Hello every 2 s, seed kept); host answers every
+  Hello; Application.runInBackground = true while connected/connecting. Load-verified.
+  Reference: user's metadata dump at D:\The_Work_Space\OpenCode\enter the Gundeon Decomp (Assembly-CSharp_dump.txt =
+  every type/method signature; MULTIPLAYER_NOTES.md). Entangled Worlds (Noita) docs don't describe its netcode.
+- 0.45.0–0.47.0: in-game Multiplayer menu. MenuButtons clones the menu's Options button (PauseMenuController.Start
+  postfix → OptionsButton; MainMenuFoyerController.InitializeMainMenu postfix → ControlsButton = "OPTIONS" on the
+  title), strips non-dfControl components, Text "MULTIPLAYER" (IsLocalized false), Click → MultiplayerMenu.Open.
+  Layout: new button takes the anchor's spot; the anchor and dfButtons above move UP by the measured row spacing
+  (pushing down cut QUIT off screen). Screenshot-verified on the title: PLAY/OPTIONS/MULTIPLAYER/QUIT.
+  MultiplayerMenu = IMGUI panel (name, Host Steam/Invite, Host LAN, Find LAN, join by address, PvP, teleport, leave;
+  Esc/Back). F8 DebugWindow now hidden by default (backup). Hosting/joining (incl. accepting a Steam invite) on the
+  title screen presses the title's NewGameButton (PLAY) via DoClick → straight into the Breach.
+  tools\screenshot-game.ps1 saves a screenshot of the game window. Not yet: controller navigation onto the new button.
+- The Bare profile also has a Gale-imported Gungeon Online 0.43.0 that BepInEx skips (harmless).
 - The user removed the Gale-imported duplicate (only Gungeon_Online-dev remains as of 0.8.0).
 - The user also imported the zip via Gale (`plugins\Gungeon_Online`), duplicating the dev copy; asked them to uninstall it.
 - 2026-10-10, 0.2.0, LAN on one PC (two copies): **Connected**, ping 7 ms, name tags placed correctly over the partner
@@ -329,3 +348,48 @@ BepInEx plugin (loader API) + Steamworks.NET that the game already ships.
 1. In-game test: plugin loads (log line), F8 window, host lobby, friend joins, ping shows.
 2. Check the name-tag marker lines up with the partner (EtG's pixel-perfect camera may offset WorldToScreenPoint).
 3. Milestone 3: show the partner as a real in-game character (likely by spawning/driving the co-op player).
+
+- 0.48.0: our IMGUI panels covered the game's cursor (GameCursorController draws in OnGUI). Plugin.OnGUI sets GUI.depth = -1000 and, while the Multiplayer menu or F8 window is open, calls GameCursorController.DrawCursor() after drawing them (Repaint only). Screenshot-verified with the F8 window.
+
+- 0.49.0/0.50.0: SteamFriendsList: immediate friends with GetFriendGamePlayed AppID 311690 (m_steamIDLobby = joinable lobby → Join button); rich presence 'gungeononline' = our version while online and 'connect' = '+connect_lobby <id>' while in a lobby (Steam friends-list Join Game). Menu section 'Friends playing Enter the Gungeon' (refresh 3 s; hosts first). Screenshot-verified the menu opens from the title button (needs a ~250 ms press when clicked synthetically) and shows the section. tools\click-game.ps1 added.
+
+## 0.51.0 / 0.52.0 (2026-10-15) — save sync ("host's world, your own save") + bullet fix
+- Cause of guest black screen (guest save further along): floor generation reads save progress
+  (log: guest injected "gunber muncher" metadata, host "nothing"); guest's F1 generation retried forever.
+- New SaveSync.cs: host serializes GameStatsManager with the game's own
+  SerializationHelpers.SerializeToContent<GameStatsManager, FullSerializerSerializer>, gzips, sends as
+  MsgType.Progress (28) chunks of 12 KB (reliable) on connect (throttled 10 s) and before each run start's LevelLoad.
+  Joiner deserializes into an in-memory copy (never saved). While a floor loads (LevelSync LoadNextLevel /
+  LoadCustomLevel prefixes -> BeginBorrow; ends when !IsLoadingLevel + new Dungeon + player, +1.5 s, cap 90 s)
+  a generic Harmony prefix answers 24 GameStatsManager read methods from the host copy. Writes untouched,
+  so Hegemony Credit/unlocks go to each player's own save. 1-arg "current character" overloads not patched.
+  Save folder backed up once per game session to BepInEx/config/GungeonOnline-save-backups (keeps 10).
+  Protocol 21. Self-test on start: round-trip OK, 11 KB (3 KB packed), 434/434 flags match.
+- 0.51 load bug: AccessTools.Method ambiguous on SerializeToContent overloads aborted Plugin.Awake → fixed (0.52).
+- Shots now unreliable: reliable ordering made one lost packet hold back later bullets → late burst fire.
+- Known gap: prerequisites that check the *player's character* still use each player's own character.
+- 0.53–0.55: SaveSlotLabel.cs — "SAVE SLOT X ▼" top-right on the title screen; click opens Slot A–D list
+  (disabled while online). Switch = SaveManager.TargetSaveSlot + GameManager.LoadMainMenu (same as Options'
+  ChangeSaveSlot). Hidden once DisableMainMenu turns the title GUIManager off (Breach). Verified in game.
+- 0.56: Boss stayed alive on a ghost host after the guest killed it: HealthHaver.BossHealthSanityCheck refuses a
+  killing blow on a boss when PrimaryPlayer is dead and the game isn't local co-op. EnemySync prefix returns true
+  while applyingRemote. Boss-kill revive: RoomHandler.HandleBossClearReward postfix on the living player sends
+  Revive(pos, fromBoss=true) when the partner is a ghost (no chest opened on the receiver). Protocol 22. Load-verified.
+- 0.57: LootSync.cs + PartnerMapMarker.cs (protocol 23, msgs 29–34).
+  Chests: Chest.Open postfix -> ChestOpened(pos); receiver nulls contents (re-roll, not for mimics), ForceUnlock,
+  ForceOpen; teleports to partner if not in that room. DeathSync.ReviveChest excludes the revive chest.
+  Master Round: drop is AIActor.HandleLootPinata reading room.PlayerHasTakenDamageInThisRoom. PlayerController.Damaged
+  postfix sends HitInRoom once per room; pinata prefix clears the flag (restored after) when partner is alive, in the
+  boss room, and not hit there.
+  Guns: Gun.DropGun pre/postfix -> GunDropped(id host-even/joiner-odd, pickupId, ammo, pos); receiver
+  LootEngine.SpawnItem. Gun.Pickup prefix on a tracked gun -> GunTaken; receiver destroys its copy if still on floor.
+  Shop: PlayerController.HandleItemPurchased/HandleItemStolen postfix -> ShopItemGone(pos) -> ForceOutOfStock.
+  Wallet: per-frame delta of Currency/KeyBullets while both in a run -> Wallet(dm, dk) applied on partner.
+  Note: both games drop money for the same kills, so shared income is ~2x solo.
+  Rat: ShouldBeTakenByRat returns false while primary is dead; prefix sets currentHealth 0.5 for the call.
+  Map: clone of our minimapIconPrefab, tinted, at Minimap.transform + world/8 (z -1) like UpdatePlayerPositionExact.
+  Load-verified only; needs a two-player test.
+- 0.58: Partner map marker uses their character prefab's minimapIconPrefab (CharacterSelectController path), falls
+  back to our tinted icon. HalfMoney host rule (config Rules/HalfMoney, default on; menu toggle; sent in Rules,
+  protocol 24): CurrencyPickup.Pickup prefix halves currencyValue (non-meta) with a carried remainder while in a
+  shared run. Load-verified.

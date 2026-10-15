@@ -89,7 +89,11 @@ namespace GungeonOnline
             float speed = p.baseData.speed, damage = p.baseData.damage, range = p.baseData.range;
             float scale = p.AdditionalScaleMultiplier;
             string level = LevelSync.CurrentLevelKey();
-            session.SendReliable(MsgType.Shot, delegate (BinaryWriter w)
+            // Unreliable on purpose: reliable messages wait for any lost one before them to be re-sent, so one
+            // lost packet held back every later bullet, which then all came out at once (late "burst fire").
+            // A bullet that's lost now is only missing from the partner's screen (damage is decided by
+            // whoever's bullet it is).
+            session.SendUnreliable(MsgType.Shot, delegate (BinaryWriter w)
             {
                 w.Write(level);
                 w.Write(prefabName);
