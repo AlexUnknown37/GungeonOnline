@@ -31,6 +31,10 @@ namespace GungeonOnline
         public static void Open()
         {
             open = true;
+            focus = 0;
+            pendingActivate = -1;
+            // The press that opened us (A on the MULTIPLAYER button) must not also press our first button.
+            ignoreInputUntil = Time.realtimeSinceStartup + 0.25f;
             nameField = Plugin.DisplayName();
             addressField = Plugin.LastLanAddress.Value;
             message = "";
@@ -39,14 +43,144 @@ namespace GungeonOnline
         public static void Close()
         {
             open = false;
+            MenuGuard.OnMenuClosed();
             session.Discovery.Stop();
         }
 
         public static void Update()
         {
+            if (open)
+                ReadController();
             UpdateJoinerTitleStart();
-            if (open && Input.GetKeyDown(KeyCode.Escape))
+            if (open && (Input.GetKeyDown(KeyCode.Escape) || backPressed))
                 Close();
+            backPressed = false;
+        }
+
+        // ---- Controller (and arrow keys / Enter) ----
+        // Every button and switch gets a number as it's drawn; one of them is selected (highlighted). Up/down
+        // (D-pad, left stick, arrow keys) moves the selection, A / Enter presses it, B / Esc goes back.
+        // Text boxes can't be typed into with a controller, so they're skipped.
+        private static int focus, navIndex, navCount, pendingActivate = -1;
+        private static bool backPressed, usingController;
+        private static float nextStickMoveAt;
+        private static Rect focusRect;
+        private static bool hasFocusRect;
+        private static float viewHeight;
+        private static GUIStyle highlighted, highlightedToggle;
+
+        private static float ignoreInputUntil;
+
+        private static void ReadController()
+        {
+            if (Time.realtimeSinceStartup < ignoreInputUntil)
+                return;
+            InControl.InputDevice d = InControl.InputManager.ActiveDevice;
+            int move = 0;
+            bool confirm = false, back = false;
+            if (d != null)
+            {
+                if (d.DPadUp.WasPressed) move = -1;
+                if (d.DPadDown.WasPressed) move = 1;
+                float y = d.LeftStickY.Value;
+                if (Mathf.Abs(y) > 0.6f && Time.realtimeSinceStartup >= nextStickMoveAt)
+                {
+                    move = y > 0f ? -1 : 1;
+                    nextStickMoveAt = Time.realtimeSinceStartup + 0.25f;
+                }
+                else if (Mathf.Abs(y) < 0.3f)
+                {
+                    nextStickMoveAt = 0f;
+                }
+                confirm = d.Action1.WasPressed;
+                back = d.Action2.WasPressed;
+            }
+            if (Input.GetKeyDown(KeyCode.UpArrow)) move = -1;
+            if (Input.GetKeyDown(KeyCode.DownArrow)) move = 1;
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)) confirm = true;
+            if (move != 0 || confirm || back)
+                usingController = true;
+            if (Input.GetAxis("Mouse X") != 0f || Input.GetAxis("Mouse Y") != 0f)
+                usingController = false;
+            if (move != 0 && navCount > 0)
+                focus = (focus + move + navCount) % navCount;
+            if (confirm)
+                pendingActivate = focus;
+            if (back)
+                backPressed = true;
+        }
+
+        private static GUIStyle Highlight(GUIStyle style, bool toggle)
+        {
+            if (toggle)
+            {
+                if (highlightedToggle == null)
+                {
+                    highlightedToggle = new GUIStyle(style);
+                    highlightedToggle.normal.textColor = new Color(0.95f, 0.78f, 0.35f);
+                    highlightedToggle.onNormal.textColor = highlightedToggle.normal.textColor;
+                }
+                return highlightedToggle;
+            }
+            if (highlighted == null)
+            {
+                highlighted = new GUIStyle(style);
+                highlighted.normal = style.hover;
+                highlighted.normal.textColor = new Color(0.95f, 0.78f, 0.35f);
+                highlighted.fontStyle = FontStyle.Bold;
+            }
+            return highlighted;
+        }
+
+        // A button that the controller can select and press.
+        private static bool Btn(string text, GUIStyle style, params GUILayoutOption[] options)
+        {
+            int index = navIndex++;
+            bool selected = usingController && index == focus;
+            bool clicked = GUILayout.Button(selected ? "> " + text + " <" : text, selected ? Highlight(style, false) : style, options);
+            Track(index);
+            if (pendingActivate == index && Event.current.type == EventType.Layout)
+            {
+                pendingActivate = -1;
+                if (GUI.enabled)
+                    clicked = true;
+            }
+            return clicked;
+        }
+
+        private static bool Tog(bool value, string text, GUIStyle style, params GUILayoutOption[] options)
+        {
+            int index = navIndex++;
+            bool selected = usingController && index == focus;
+            bool result = GUILayout.Toggle(value, selected ? "> " + text : text, selected ? Highlight(style, true) : style, options);
+            Track(index);
+            if (pendingActivate == index && Event.current.type == EventType.Layout)
+            {
+                pendingActivate = -1;
+                if (GUI.enabled)
+                    result = !value;
+            }
+            return result;
+        }
+
+        // Where the selected control is, to scroll it into view.
+        private static void Track(int index)
+        {
+            if (index == focus && Event.current.type == EventType.Repaint)
+            {
+                focusRect = GUILayoutUtility.GetLastRect();
+                hasFocusRect = true;
+            }
+        }
+
+        private static void ScrollToFocus()
+        {
+            if (!usingController || !hasFocusRect || viewHeight <= 0f)
+                return;
+            if (focusRect.yMax > scroll.y + viewHeight)
+                scroll.y = focusRect.yMax - viewHeight + 8f;
+            else if (focusRect.y < scroll.y)
+                scroll.y = Mathf.Max(0f, focusRect.y - 8f);
         }
 
         private static void MakeStyles()
@@ -93,17 +227,36 @@ namespace GungeonOnline
             float h = Mathf.Min(720f, Screen.height - 40f);
             Rect r = new Rect((Screen.width - w) / 2f, (Screen.height - h) / 2f, w, h);
             GUI.Box(r, GUIContent.none, panel);
+            if (Event.current.type == EventType.Layout)
+            {
+                navCount = navIndex;
+                navIndex = 0;
+                if (navCount > 0 && focus >= navCount)
+                    focus = navCount - 1;
+            }
+            else if (Event.current.type == EventType.Repaint)
+            {
+                navIndex = 0;
+            }
+            else
+            {
+                navIndex = 0;
+            }
+            viewHeight = r.height - 44f;
+            ScrollToFocus();
             GUILayout.BeginArea(new Rect(r.x + 28f, r.y + 22f, r.width - 56f, r.height - 44f));
             scroll = GUILayout.BeginScrollView(scroll);
 
             GUILayout.Label("MULTIPLAYER", title);
-            GUILayout.Label("Early alpha side project - expect bugs!", small);
+            if (usingController)
+                GUILayout.Label("Controller: up/down to choose, A to press, B to go back.", small);
+            GUILayout.Label("Version " + Plugin.ModVersion + "  -  early alpha side project, expect bugs! Both players need the same version.", small);
             GUILayout.Space(10);
 
             GUILayout.Label("Your name", label);
             GUILayout.BeginHorizontal();
             nameField = GUILayout.TextField(nameField, 24, field);
-            if (GUILayout.Button("Save", button, GUILayout.Width(100)))
+            if (Btn("Save", button, GUILayout.Width(100)))
             {
                 Plugin.PlayerName.Value = nameField.Trim();
                 message = "Others will see you as: " + Plugin.DisplayName();
@@ -123,7 +276,7 @@ namespace GungeonOnline
             }
 
             GUILayout.Space(14);
-            if (GUILayout.Button("Back", button))
+            if (Btn("Back", button))
                 Close();
             GUILayout.EndScrollView();
             GUILayout.EndArea();
@@ -134,7 +287,7 @@ namespace GungeonOnline
             GUILayout.Label("Play online with Steam friends", label);
             if (session.SteamAvailable)
             {
-                if (GUILayout.Button("Host on Steam", button))
+                if (Btn("Host on Steam", button))
                 {
                     session.HostSteam();
                     message = "Lobby created. Use \"Invite friend\" to bring someone in.";
@@ -150,19 +303,19 @@ namespace GungeonOnline
 
             GUILayout.Space(12);
             GUILayout.Label("Play on your home network (LAN)", label);
-            if (GUILayout.Button("Host on LAN", button))
+            if (Btn("Host on LAN", button))
             {
                 bool ok = session.HostLan(Plugin.LanPort.Value);
                 message = ok ? "" : "Couldn't host. Is the port already in use?";
                 if (ok)
                     EnterBreachFromTitle();
             }
-            if (GUILayout.Button("Find LAN games", button))
+            if (Btn("Find LAN games", button))
                 session.Discovery.Search(Plugin.LanPort.Value);
             foreach (LanDiscovery.FoundHost host in session.Discovery.Found)
             {
                 string text = "Join " + host.Name + (host.SameVersion ? "" : "  (different version)");
-                if (GUILayout.Button(text, button) && host.SameVersion)
+                if (Btn(text, button) && host.SameVersion)
                 {
                     session.Discovery.Stop();
                     bool ok = session.JoinLan(host.Address);
@@ -177,7 +330,7 @@ namespace GungeonOnline
             GUILayout.Label("Or join by address (e.g. 192.168.1.20):", small);
             GUILayout.BeginHorizontal();
             addressField = GUILayout.TextField(addressField, field);
-            if (GUILayout.Button("Join", button, GUILayout.Width(100)))
+            if (Btn("Join", button, GUILayout.Width(100)))
                 JoinAddress(addressField.Trim());
             GUILayout.EndHorizontal();
         }
@@ -196,7 +349,7 @@ namespace GungeonOnline
             GUILayout.Label(link.Kind + (link.IsHost ? " host" : "") + "  -  " + link.Info, small);
             GUILayout.Space(8);
 
-            if (link == session.Steam && link.IsHost && GUILayout.Button("Invite friend", button))
+            if (link == session.Steam && link.IsHost && Btn("Invite friend", button))
                 session.Steam.Lobby.OpenInviteOverlay();
 
             if (session.Status == NetSession.State.Connected)
@@ -204,7 +357,7 @@ namespace GungeonOnline
                 string why;
                 bool canTeleport = PlayerWarp.CanTeleportToPartner(out why);
                 GUI.enabled = canTeleport;
-                if (GUILayout.Button(canTeleport ? "Teleport to partner" : "Teleport to partner (" + why + ")", button))
+                if (Btn(canTeleport ? "Teleport to partner" : "Teleport to partner (" + why + ")", button))
                 {
                     PlayerWarp.TeleportToPartner();
                     Close();
@@ -214,13 +367,13 @@ namespace GungeonOnline
 
             if (link.IsHost)
             {
-                bool pvp = GUILayout.Toggle(Plugin.Pvp.Value, "  PvP: players' bullets hurt each other", label);
+                bool pvp = Tog(Plugin.Pvp.Value, "  PvP: players' bullets hurt each other", label);
                 if (pvp != Plugin.Pvp.Value)
                 {
                     Plugin.Pvp.Value = pvp;
                     session.SendRules();
                 }
-                bool half = GUILayout.Toggle(Plugin.HalfMoney.Value, "  Half money: shared purse, pickups count half", label);
+                bool half = Tog(Plugin.HalfMoney.Value, "  Half money: shared purse, pickups count half", label);
                 if (half != Plugin.HalfMoney.Value)
                 {
                     Plugin.HalfMoney.Value = half;
@@ -234,7 +387,7 @@ namespace GungeonOnline
             }
 
             GUILayout.Space(8);
-            if (GUILayout.Button(link.IsHost ? "Stop hosting" : "Leave", button))
+            if (Btn(link.IsHost ? "Stop hosting" : "Leave", button))
             {
                 session.Leave();
                 message = "";
@@ -265,7 +418,7 @@ namespace GungeonOnline
                 if (f.ModVersion.Length > 0 && f.ModVersion != Plugin.ModVersion)
                     status += "  - different version!";
                 GUILayout.Label(f.Name + "  -  " + status, small);
-                if (f.Hosting && GUILayout.Button("Join", button, GUILayout.Width(100)))
+                if (f.Hosting && Btn("Join", button, GUILayout.Width(100)))
                 {
                     message = "Joining " + f.Name + "...";
                     session.JoinSteamLobby(f.Lobby);

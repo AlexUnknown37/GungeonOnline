@@ -486,3 +486,14 @@ BepInEx plugin (loader API) + Steamworks.NET that the game already ships.
   WorldSync now sends a table's resting place reliably once it's still for 0.4 s, and every 3 s re-sends every
   table we moved (reliable, max 40); receiver skips positions it already has and doesn't override a table we're
   pushing right now. Load-verified.
+- 0.80: Version shown in game: 'Gungeon Online vX' bottom-left of the title screen (SaveSlotLabel) and at the top of the Multiplayer menu (Plugin.ModVersion). Screenshot-verified.
+- 0.81–0.88: Controller support for the menus. Causes found in the game's code:
+  MainMenuFoyerController.Update refocuses Continue/NewGame whenever none of ITS buttons (NewGame, Controls,
+  XboxLive, Quit, Continue) has focus -> our button goes in the unused XboxLiveButton slot. The copied button
+  keeps its UIKeyControls (up/down links), linked between the anchor and the anchor's old "down"; pause-menu
+  links refreshed by visible position every 0.5 s (falls back to the original down link). MenuGuard.cs: while our
+  menu is open (+0.3 s after): InControlInputAdapter.ProcessPrimary/SecondaryPlayerInput (controller -> dfGUI
+  menus), MainMenuFoyerController.Update and GameManager.Unpause are skipped. MultiplayerMenu: Btn/Tog helpers
+  number every control; D-pad/stick/arrows move, A/Enter press (applied in the Layout pass), B/Esc back, scrolls
+  to the selection, ignores input for 0.25 s after opening. Verified on the title screen with arrow keys:
+  select MULTIPLAYER, open, move, Back, then down to QUIT. Pause menu not re-tested.

@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.79.0";
+        public const string ModVersion = "0.88.0";
 
         public static ManualLogSource Log;
 
@@ -69,6 +69,7 @@ namespace GungeonOnline
             ThrowSync.Init(session, harmony);
             BlankSync.Init(session, harmony);
             MenuButtons.Init(harmony);
+            MenuGuard.Init(harmony);
             MultiplayerMenu.Init(session);
             PauseSync.Init(session);
             WorldSync.Init(session, harmony);
@@ -164,6 +165,7 @@ namespace GungeonOnline
             DeathSync.Update();
             PauseSync.Update();
             MultiplayerMenu.Update();
+            MenuButtons.Update();
             if (steamChecked)
                 SteamFriendsList.UpdateOwnPresence(session);
             WorldSync.Update();

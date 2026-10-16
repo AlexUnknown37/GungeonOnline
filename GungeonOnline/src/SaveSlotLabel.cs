@@ -15,7 +15,7 @@ namespace GungeonOnline
         private static MainMenuFoyerController title;
         private static float nextLookAt;
         private static bool listOpen;
-        private static GUIStyle style, shadow, item, itemCurrent;
+        private static GUIStyle style, shadow, item, itemCurrent, small, smallShadow;
 
         public static void Init(NetSession netSession)
         {
@@ -44,6 +44,13 @@ namespace GungeonOnline
                 return;
             }
             MakeStyles();
+
+            // Our version, bottom-left, so players can check they match before playing together.
+            string version = "Gungeon Online v" + Plugin.ModVersion;
+            Vector2 vSize = small.CalcSize(new GUIContent(version));
+            Rect vr = new Rect(16f, Screen.height - vSize.y - 16f, vSize.x + 8f, vSize.y + 4f);
+            GUI.Label(new Rect(vr.x + 2f, vr.y + 2f, vr.width, vr.height), version, smallShadow);
+            GUI.Label(vr, version, small);
 
             float size = style.fontSize;
             string text = "SAVE SLOT " + SaveManager.CurrentSaveSlot + (listOpen ? "  ▲" : "  ▼");
@@ -102,6 +109,11 @@ namespace GungeonOnline
             style.hover.textColor = Color.white;
             shadow = new GUIStyle(style);
             shadow.normal.textColor = new Color(0f, 0f, 0f, 0.8f);
+            small = new GUIStyle(GUI.skin.label);
+            small.fontSize = Mathf.Max(14, Screen.height / 60);
+            small.normal.textColor = new Color(0.95f, 0.78f, 0.35f, 0.9f);
+            smallShadow = new GUIStyle(small);
+            smallShadow.normal.textColor = new Color(0f, 0f, 0f, 0.8f);
 
             item = new GUIStyle(GUI.skin.button);
             item.fontSize = Mathf.Max(16, Screen.height / 48);
