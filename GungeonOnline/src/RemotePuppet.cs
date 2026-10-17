@@ -41,6 +41,18 @@ namespace GungeonOnline
         // For the window: what the puppet is doing right now.
         public string Status = "hidden";
 
+        // Where to put the partner's name: just above the head of the character as it's drawn right now (the
+        // smoothed position), not the newest network position, which runs a little ahead.
+        public bool TryGetHeadTop(out Vector3 world)
+        {
+            world = Vector3.zero;
+            if (go == null || !go.activeInHierarchy || sprite == null || sprite.renderer == null || !sprite.renderer.enabled)
+                return false;
+            Bounds b = sprite.renderer.bounds;
+            world = new Vector3(b.center.x, b.max.y, 0f);
+            return true;
+        }
+
         public void Update(RemotePlayerState remote, bool connected)
         {
             string hiddenReason = null;
@@ -94,7 +106,7 @@ namespace GungeonOnline
             sprite.UpdateZDepth();
             UpdateShadow(remote, feet, go.transform.position.z);
 
-            Status = "shown: " + Describe(sprite) + "\nYou: " + Describe(GameManager.Instance.PrimaryPlayer.sprite);
+            Status = "shown"; // details only when asked (Details), not rebuilt every frame
         }
 
         public void Hide()
@@ -150,6 +162,14 @@ namespace GungeonOnline
             float z = bodyZ + remote.ShadowOffset.z;
             pos.z += z - shadowRenderer.transform.position.z;
             shadowGo.transform.position = pos;
+        }
+
+        // For the F8 window: what the partner's sprite and ours look like right now.
+        public string Details()
+        {
+            if (Status != "shown" || sprite == null || !GameManager.HasInstance || GameManager.Instance.PrimaryPlayer == null)
+                return Status;
+            return "shown: " + Describe(sprite) + "\nYou: " + Describe(GameManager.Instance.PrimaryPlayer.sprite);
         }
 
         private static string Describe(tk2dBaseSprite s)

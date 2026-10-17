@@ -49,27 +49,31 @@ namespace GungeonOnline
         Reload = 42,     // we reloaded: the partner plays the reload sound
         Courses = 43,    // our steered/bouncing bullets: where they are and where they head now
         Beams = 44,      // our gun's beams: kind, start point, direction
+        AtExit = 45,     // joiner -> host: we took the exit and are waiting for you to take yours
+        ModSettings = 46, // host -> joiner: other mods' settings (Gungeon Go Vroom) to match
         Progress = 28,   // host -> joiner: one part of the host's save progress (floors are built from it)
     }
 
     public static class Protocol
     {
         // Bump this whenever the packet format changes, so old and new versions refuse to talk.
-        public const int Version = 30;
+        public const int Version = 32;
         public const int Channel = 0;
         public const int MaxPlayers = 2;
 
+        // One reusable buffer (messages are built one at a time on the main thread): a new one per message made
+        // a lot of garbage.
+        private static readonly MemoryStream buildStream = new MemoryStream(1024);
+        private static readonly BinaryWriter buildWriter = new BinaryWriter(buildStream);
+
         public static byte[] Build(MsgType type, Action<BinaryWriter> writeBody)
         {
-            using (MemoryStream stream = new MemoryStream())
-            using (BinaryWriter writer = new BinaryWriter(stream))
-            {
-                writer.Write((byte)type);
-                if (writeBody != null)
-                    writeBody(writer);
-                writer.Flush();
-                return stream.ToArray();
-            }
+            buildStream.SetLength(0);
+            buildWriter.Write((byte)type);
+            if (writeBody != null)
+                writeBody(buildWriter);
+            buildWriter.Flush();
+            return buildStream.ToArray();
         }
     }
 }

@@ -43,17 +43,23 @@ namespace GungeonOnline
             }
         }
 
+        private readonly byte[] receiveBuffer = new byte[65536];
+
         public void Poll()
         {
             if (udp == null)
                 return;
             try
             {
+                // UdpClient.Receive makes a new 64 KB buffer for every packet (a lot of garbage at dozens of packets
+                // a second); receive into one reused buffer and copy only the packet's bytes.
                 while (udp.Available > 0)
                 {
-                    IPEndPoint from = new IPEndPoint(IPAddress.Any, 0);
-                    byte[] data = udp.Receive(ref from);
-                    HandleReply(data, from);
+                    EndPoint any = new IPEndPoint(IPAddress.Any, 0);
+                    int n = udp.Client.ReceiveFrom(receiveBuffer, ref any);
+                    byte[] data = new byte[n];
+                    System.Buffer.BlockCopy(receiveBuffer, 0, data, 0, n);
+                    HandleReply(data, (IPEndPoint)any);
                 }
             }
             catch (SocketException)

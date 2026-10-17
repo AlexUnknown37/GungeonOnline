@@ -77,6 +77,9 @@ namespace GungeonOnline
             GUILayout.EndHorizontal();
             if (nameField.Trim().Length == 0)
                 GUILayout.Label("(empty = your Steam name)");
+            bool names = GUILayout.Toggle(Plugin.ShowPartnerName.Value, " Show partner's name (only on your screen)");
+            if (names != Plugin.ShowPartnerName.Value)
+                Plugin.ShowPartnerName.Value = names;
         }
 
         private void DrawOfflineOptions()
@@ -142,7 +145,7 @@ namespace GungeonOnline
                     GUILayout.Label("Partner at " + remote.Position.ToString("F1") + " in " + remote.Scene);
                     GUILayout.Label("Partner is " + (PlayableCharacters)remote.Identity + (remote.AltCostume ? " (alt costume)" : "")
                         + ", anim " + remote.Clip + " #" + remote.Frame);
-                    GUILayout.Label("Partner sprite: " + puppet.Status);
+                    GUILayout.Label("Partner sprite: " + puppet.Details());
                     if (LevelSync.WaitingToJoin)
                         GUILayout.Label("Host started a new run: Quick Restart to join it.");
                     if (remote.IsDead)
@@ -221,6 +224,9 @@ namespace GungeonOnline
         }
 
         // Draws the partner's name over their position, if we're in the same level.
+        private GUIStyle nameStyle, nameShadow;
+        private string nameText, nameFor;
+
         private void DrawRemoteMarker()
         {
             RemotePlayerState remote = session.Remote;
@@ -235,10 +241,31 @@ namespace GungeonOnline
             if (cam == null)
                 return;
 
-            Vector3 screen = cam.WorldToScreenPoint(new Vector3(remote.Position.x, remote.Position.y, 0f));
+            if (!Plugin.ShowPartnerName.Value)
+                return;
+            // Above the drawn (smoothed) character; the network position runs ahead of it.
+            Vector3 head;
+            if (!puppet.TryGetHeadTop(out head))
+                return;
+            Vector3 screen = cam.WorldToScreenPoint(head);
             if (screen.z < 0f)
                 return;
-            GUI.Label(new Rect(screen.x - 50f, Screen.height - screen.y - 40f, 100f, 22f), "[" + session.PeerName + "]");
+            if (nameStyle == null)
+            {
+                nameStyle = new GUIStyle(GUI.skin.label);
+                nameStyle.alignment = TextAnchor.LowerCenter;
+                nameStyle.fontStyle = FontStyle.Bold;
+                nameShadow = new GUIStyle(nameStyle);
+                nameShadow.normal.textColor = new Color(0f, 0f, 0f, 0.85f);
+            }
+            if (nameText == null || nameFor != session.PeerName)
+            {
+                nameFor = session.PeerName;
+                nameText = session.PeerName;
+            }
+            Rect r = new Rect(screen.x - 100f, Screen.height - screen.y - 26f, 200f, 24f);
+            GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), nameText, nameShadow);
+            GUI.Label(r, nameText, nameStyle);
         }
     }
 }

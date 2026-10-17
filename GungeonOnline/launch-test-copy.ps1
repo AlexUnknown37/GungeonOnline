@@ -8,11 +8,12 @@
 # when it notices it wasn't started by Steam. Steam must still be running.
 # Warning: both copies share the same save files. Stay in the Breach and don't start runs in both.
 # -Test host / -Test join: auto-host on LAN / auto-join 127.0.0.1 once the title screen is up.
-param([string]$Name = "", [string]$Test = "")
+# -Profile OnlineTest: run another Gale profile (no automatic install there).
+param([string]$Name = "", [string]$Test = "", [switch]$AllocProf, [string]$Profile = "Bare", [string]$TestRun = "")
 $ErrorActionPreference = "Stop"
 
 $GameDir = "S:\_Games\Steamapps\steamapps\common\Enter the Gungeon"
-$Preloader = "$env:APPDATA\com.kesomannen.gale\enter-the-gungeon\profiles\Bare\BepInEx\core\BepInEx.Preloader.dll"
+$Preloader = "$env:APPDATA\com.kesomannen.gale\enter-the-gungeon\profiles\$Profile\BepInEx\core\BepInEx.Preloader.dll"
 
 if (-not (Test-Path "$GameDir\steam_appid.txt")) {
     throw "steam_appid.txt is missing from $GameDir. Create it with the text 311690."
@@ -22,7 +23,7 @@ if (-not (Test-Path $Preloader)) {
 }
 
 $running = @(Get-Process EtG -ErrorAction SilentlyContinue).Count
-if ($running -eq 0) {
+if ($running -eq 0 -and $Profile -eq "Bare") {
     & "$PSScriptRoot\deploy.ps1"
     # Keep Running (separate mod: no pausing when tabbed out) makes two-copy testing much easier.
     $keepRunning = "$PSScriptRoot\..\..\KeepRunning\deploy.ps1"
@@ -34,8 +35,14 @@ if ($Name -ne "") {
     # Both copies share one settings file, so the name for this copy is passed on the command line.
     $gameArgs += @("--gungeon-online-name", "`"$Name`"")
 }
+if ($AllocProf) {
+    $gameArgs += @("--gungeon-online-allocprof")
+}
+if ($TestRun -ne "") {
+    $gameArgs += @("--gungeon-online-test-run", $TestRun)
+}
 if ($Test -ne "") {
     $gameArgs += @("--gungeon-online-test", $Test)
 }
 Start-Process -FilePath "$GameDir\EtG.exe" -WorkingDirectory $GameDir -ArgumentList $gameArgs
-Write-Host "Started copy #$($running + 1) of Enter the Gungeon (Bare profile)$(if ($Name) { " as $Name" })." -ForegroundColor Green
+Write-Host "Started copy #$($running + 1) of Enter the Gungeon ($Profile profile)$(if ($Name) { " as $Name" })." -ForegroundColor Green
