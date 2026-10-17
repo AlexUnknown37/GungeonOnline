@@ -61,11 +61,33 @@ namespace GungeonOnline
                 // the Cultist has none. Give it one, switched off so it doesn't play any idle animations.
                 if (flag.GetComponent<CharacterSelectIdleDoer>() == null)
                 {
-                    CharacterSelectIdleDoer idle = flag.gameObject.AddComponent<CharacterSelectIdleDoer>();
-                    idle.enabled = false;
+                    addingStandIn = true;
+                    try
+                    {
+                        CharacterSelectIdleDoer idle = flag.gameObject.AddComponent<CharacterSelectIdleDoer>();
+                        standIns.Add(idle);
+                        idle.enabled = false;
+                    }
+                    finally
+                    {
+                        addingStandIn = false;
+                    }
                 }
                 // The co-op Cultist has no info card (name + items over their head) and the select screen crashes
                 // without one. Borrow another character's card; it's relabelled when shown (AfterCreateCard).
+                // The game has the Cultist's own card (CHR_CultistPanel: face, name, gun, items); it just isn't
+                // hooked up to this select-screen entry. Use it.
+                if (flag.OverheadElement == null)
+                {
+                    foreach (FoyerInfoPanelController panel in Resources.FindObjectsOfTypeAll<FoyerInfoPanelController>())
+                    {
+                        if (panel != null && panel.name == "CHR_CultistPanel")
+                        {
+                            flag.OverheadElement = panel.gameObject;
+                            break;
+                        }
+                    }
+                }
                 if (flag.OverheadElement == null)
                 {
                     foreach (FoyerCharacterSelectFlag other in Object.FindObjectsOfType<FoyerCharacterSelectFlag>())
@@ -85,6 +107,24 @@ namespace GungeonOnline
         }
 
         private static FoyerCharacterSelectFlag cultistFlag;
+
+        // The stand-in idle part has no animations: it must never start its idle animation (that errored).
+        private static bool addingStandIn;
+        private static readonly System.Collections.Generic.HashSet<CharacterSelectIdleDoer> standIns = new System.Collections.Generic.HashSet<CharacterSelectIdleDoer>();
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(CharacterSelectIdleDoer), "OnEnable")]
+        private static bool BeforeIdleEnable(CharacterSelectIdleDoer __instance)
+        {
+            return !(addingStandIn || standIns.Contains(__instance));
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(CharacterSelectIdleDoer), "Update")]
+        private static bool BeforeIdleUpdate(CharacterSelectIdleDoer __instance)
+        {
+            return !standIns.Contains(__instance);
+        }
         private static readonly System.Reflection.FieldInfo extantCardField = AccessTools.Field(typeof(FoyerCharacterSelectFlag), "m_extantOverheadUIElement");
 
         // The borrowed card: show "The Cultist" and hide the other character's face and items.

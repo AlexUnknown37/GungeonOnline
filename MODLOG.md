@@ -497,3 +497,39 @@ BepInEx plugin (loader API) + Steamworks.NET that the game already ships.
   number every control; D-pad/stick/arrows move, A/Enter press (applied in the Layout pass), B/Esc back, scrolls
   to the selection, ignores input for 0.25 s after opening. Verified on the title screen with arrow keys:
   select MULTIPLAYER, open, move, Back, then down to QUIT. Pause menu not re-tested.
+- 0.89 (protocol 31): Guest waits at the exit. LevelSync LoadNextLevel/LoadCustomLevel prefixes are now bool: a
+  joiner's own mid-run load (not a run start, not a follow) is held - DelayedLoadNextLevel_CR already set
+  GameManager.m_loadingLevel, so it's reset to false - joiner sends AtExit (45, host shows a toast) and shows
+  "Waiting for <host> to take the exit..." until the host's LevelLoad arrives (OnLevelLoad marks followLoad and
+  loads the host floor). Host disconnects while waiting -> our own load goes ahead (bypassWait). Load-verified.
+- Compat: Gungeon Go Vroom 1.7.2 (CaptainPretzel, incl. OptimizeIMGUI) installed manually in Bare plugins/CaptainPretzel-Gungeon_Go_Vroom. Two-copy LAN test: both load, connect (10 ms), F8 IMGUI window draws, partner puppet (Robot) shown in the Breach. Both players need it with identical settings (Shuffle Fix / random cell lookup change floor generation).
+- 0.90 (protocol 32): ModSettingsSync.cs - host sends Gungeon Go Vroom's Gunfig options (GGV.ConfigMenu._Gunfig + submenus) on connect and on change (2 s poll); joiner Gunfig.Set()s differing values, SaveActiveConfigsToDisk, toast to restart once (GGV applies patches at startup); joiner without the mod gets an install hint. Verified: host Shuffle Fix=Enabled, guest file set to Disabled before launch -> on join 'changed 1 settings', file saved back to Enabled.
+- 0.91–0.97: TheGarbageCollector 1.4.5 (ApacheThunder) installed in Bare (manual). Memory test (private MB, Breach):
+  game alone ~33 MB/min; two connected copies ~190 MB/min. AllocProfiler.cs (--gungeon-online-allocprof /
+  launch-test-copy -AllocProf) logs per-subsystem managed allocations every 30 s: session.Update = 60 MB/30 s.
+  Cause: Mono UdpClient.Receive allocates a 64 KB buffer per packet -> LanLink/LanDiscovery now ReceiveFrom into a
+  reused 64 KB buffer and copy n bytes (Steam path already reused a buffer). Also: cached CurrentLevelKey,
+  puppet Status no per-frame text (Details() for F8), Steam presence compared by value, Protocol.Build and the
+  receive BinaryReader reuse one stream, StringBuilder for settings signatures. After: host session.Update
+  ~0.5-2 MB/30 s, memory flat while connected.
+  Cultist stand-in CharacterSelectIdleDoer: OnEnable/Update skipped (its idle coroutine NRE'd). Select-screen
+  card: CHR_CultistPanel (exists as an asset, not wired to the coop flag) used as the flag's OverheadElement -
+  screenshot shows the real card.
+  Guest at the Breach elevator while the host is still in the Breach: held ("Waiting for <host> to start the
+  run...") until the host's run-start LevelLoad, then follows it directly (no quick restart).
+- 0.98: Partner name tag drawn above the drawn (smoothed) puppet's renderer bounds (RemotePuppet.TryGetHeadTop) instead of the newest network position; centered, bold, shadowed, text cached. New config Display/ShowPartnerName (default on), toggle in the Multiplayer menu (connected), client-side only. Screenshot-verified.
+- 0.99: 'Show partner's name' toggle now in the Multiplayer menu for both states (connected and not) right under the name row, and in the F8 window under the name row. Screenshot-verified in F8.
+- 0.100: Test-run mode for automated floor tests: `--gungeon-online-test-run <PrefabSuffix>` (launch-test-copy
+  -TestRun PlayerRogue) picks that character's flag on the Breach select screen; the host starts the run 8 s after
+  both have a player. launch-test-copy -Profile <name> (only Bare is auto-deployed). OnlineTest Gale profile = copy
+  of Default (30 mods) + Gungeon_Online-dev; Default untouched.
+- 0.101: Default-modpack test (OnlineTest). Found: (1) Expand the Gungeon's ExpandJungleTreeController.Start
+  adds Keep_JungleElevatorRoom or ...Room2 after generation via BraveUtility.Shuffle/RandomElement (unseeded
+  UnityEngine.Random) -> host/guest differ. ExpandSync.cs patches its <Start> MoveNext (found by name on the first
+  frames, Expand loads after us): online, Random.InitState(runSeed*31 + tree x*7919 + y) around each step, state
+  restored after. (2) FloorCheck reloads produced a totally different layout: GameManager.set_CurrentRunSeed only
+  redoes "STARTUP SEED DATA" (MetaInjectionData.ClearBlueprint + PreprocessRun, RewardManifest) when the seed
+  changes or m_forceSeedUpdate; generation uses up the blueprint, so a same-seed reload diverged. ReloadHostFloor
+  now sets m_forceSeedUpdate first. Retest: 23-room floor matched (CD698E77); no jungle tree and no reload on that
+  floor, so both fixes are untested in play. Pre-existing, not ours: Emulate the Gungeon MissingMethodException
+  (ETGMod Chest DOnPreOpen), AudioAnimatorListener.Start NRE.

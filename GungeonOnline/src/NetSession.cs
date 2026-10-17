@@ -267,6 +267,18 @@ namespace GungeonOnline
             link.OnLost = Disconnect;
         }
 
+        private readonly MemoryStream recvStream = new MemoryStream(2048);
+        private BinaryReader recvReaderField;
+        private BinaryReader recvReader
+        {
+            get
+            {
+                if (recvReaderField == null)
+                    recvReaderField = new BinaryReader(recvStream);
+                return recvReaderField;
+            }
+        }
+
         private void HandlePacket(byte[] data, int offset, int length)
         {
             if (length < 1 || Link == null)
@@ -274,7 +286,11 @@ namespace GungeonOnline
 
             lastReceivedAt = Time.realtimeSinceStartup;
             MsgType type = (MsgType)data[offset];
-            using (BinaryReader r = new BinaryReader(new MemoryStream(data, offset + 1, length - 1)))
+            // One reusable reader for incoming messages (a new one per message made a lot of garbage).
+            recvStream.SetLength(0);
+            recvStream.Write(data, offset + 1, length - 1);
+            recvStream.Position = 0;
+            BinaryReader r = recvReader;
             {
                 switch (type)
                 {
@@ -298,6 +314,7 @@ namespace GungeonOnline
                         LevelSync.OnConnected();
                         InventorySync.OnConnected();
                         FloorCheck.OnConnected();
+                        ModSettingsSync.OnConnected();
                         Plugin.Log.LogInfo("Connected to " + PeerName + " over " + Link.Kind + "!");
                         break;
 
@@ -477,6 +494,16 @@ namespace GungeonOnline
 
                     case MsgType.Beams:
                         BeamSync.OnBeams(r);
+                        break;
+
+                    case MsgType.AtExit:
+                        if (Link.IsHost)
+                            LevelSync.OnPartnerAtExit();
+                        break;
+
+                    case MsgType.ModSettings:
+                        if (!Link.IsHost)
+                            ModSettingsSync.OnModSettings(r);
                         break;
 
                     case MsgType.Progress:

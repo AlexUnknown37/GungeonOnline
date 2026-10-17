@@ -58,6 +58,52 @@ namespace GungeonOnline
             harmony.PatchAll(typeof(LevelSync));
         }
 
+        // Joiner took an exit (elevator, shortcut...) before the host: we wait instead of loading, so the host's game
+        // always loads a floor first and ours follows it. followLoad marks loads we start to follow the host.
+        private static bool followLoad;
+        private static bool waitingAtExit;
+        private static bool waitingForRunStart;   // held at the Breach elevator until the host starts the run
+        private static string waitingCustom;   // the special floor our exit led to, if any
+        private static float waitingToastAt;
+        private static bool bypassWait;        // host gone: our own load goes ahead
+        private static readonly FieldInfo loadingLevelField = AccessTools.Field(typeof(GameManager), "m_loadingLevel");
+        private static readonly FieldInfo forceSeedUpdateField = AccessTools.Field(typeof(GameManager), "m_forceSeedUpdate");
+
+        public static bool WaitingAtExit
+        {
+            get { return waitingAtExit; }
+        }
+
+        // Hold our exit until the host takes theirs. Returns true if the load must not happen now.
+        private static bool HoldForHost(GameManager gm, string custom)
+        {
+            if (followLoad || bypassWait)
+            {
+                followLoad = false;
+                bypassWait = false;
+                return false;
+            }
+            if (!IsConnectedJoiner())
+                return false;
+            if (!waitingAtExit)
+            {
+                Plugin.Log.LogInfo("We took the exit before the host: waiting for the host to load first.");
+                session.SendReliable(MsgType.AtExit, null);
+            }
+            waitingAtExit = true;
+            waitingCustom = custom;
+            waitingToastAt = 0f;
+            // The delayed load already marked the game as loading; un-mark it so the host's load can be followed.
+            if (loadingLevelField != null)
+                loadingLevelField.SetValue(gm, false);
+            return true;
+        }
+
+        public static void OnPartnerAtExit()
+        {
+            Toast.Show((session.PeerName ?? "Your partner") + " is waiting for you at the exit.", 6f);
+        }
+
         // Joiner: the floor we're on (or loading), to skip loading the same floor twice.
         private static LevelInfo ourLevel;
 
@@ -76,11 +122,28 @@ namespace GungeonOnline
 
         // A short id for "which level am I on", so the puppet only shows when both are on the same floor.
         // Every dungeon floor runs in the same Unity scene, so the dungeon object's name is added.
+        // Cached: it's asked for many times a frame, and building the text each time made a lot of garbage
+        // (which matters with The Garbage Collector mod, which only cleans up between floors).
+        private static int cachedSceneHash = int.MinValue;
+        private static Object cachedDungeon;
+        private static bool cachedHadDungeon;
+        private static string cachedKey = "";
+
         public static string CurrentLevelKey()
         {
-            string key = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
-            if (GameManager.HasInstance && GameManager.Instance.Dungeon != null)
-                key += "|" + GameManager.Instance.Dungeon.gameObject.name;
+            UnityEngine.SceneManagement.Scene scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            Dungeonator.Dungeon d = GameManager.HasInstance ? GameManager.Instance.Dungeon : null;
+            bool hasDungeon = d != null;
+            int sceneHash = scene.GetHashCode();
+            if (sceneHash == cachedSceneHash && hasDungeon == cachedHadDungeon && ReferenceEquals(d, cachedDungeon))
+                return cachedKey;
+            string key = scene.name;
+            if (hasDungeon)
+                key += "|" + d.gameObject.name;
+            cachedSceneHash = sceneHash;
+            cachedDungeon = d;
+            cachedHadDungeon = hasDungeon;
+            cachedKey = key;
             return key;
         }
 
@@ -132,7 +195,7 @@ namespace GungeonOnline
 
         [HarmonyPrefix]
         [HarmonyPatch(typeof(GameManager), "LoadNextLevel")]
-        private static void BeforeLoadNextLevel(GameManager __instance)
+        private static bool BeforeLoadNextLevel(GameManager __instance)
         {
             insideLoadNextLevel = true;
             bool startingRun = __instance.IsFoyer || departedFoyer || insideQuickRestart || continuingSavedRun;
@@ -142,10 +205,21 @@ namespace GungeonOnline
             // ReturnToFoyer and LoadCharacterSelect go through LoadNextLevel too. That's not a floor to
             // follow; a second "load level N" made the joiner start two loads at once and hang forever.
             if (insideFoyerReturn)
-                return;
+                return true;
 
             if (IsConnectedJoiner())
             {
+                // Our own exit in the middle of a run: wait for the host (they load first, we follow).
+                // Same when we start a run (Breach elevator) while the host is still in the Breach: their run's
+                // floor is the one we join, so wait until they start it.
+                bool hostNotInRun = startingRun && hostLevel == null && !restartingForHost && !insideQuickRestart;
+                if ((!startingRun || hostNotInRun) && HoldForHost(__instance, null))
+                {
+                    waitingForRunStart = hostNotInRun;
+                    insideLoadNextLevel = false;
+                    return false;
+                }
+                followLoad = false;
                 // Build this floor from the host's save progress so it comes out the same as theirs.
                 SaveSync.BeginBorrow();
                 // Starting a run while the host is in one: start on the host's run instead of our own.
@@ -167,10 +241,10 @@ namespace GungeonOnline
                 loading.Index = (int)nextLevelIndexField.GetValue(__instance);
                 loading.Custom = __instance.InjectedLevelName ?? "";
                 ourLevel = loading;
-                return;
+                return true;
             }
             if (!IsConnectedHost())
-                return;
+                return true;
 
             // A fresh seed for every new run (Quick Restart would otherwise replay the same dungeon).
             if (startingRun || __instance.CurrentRunSeed == 0)
@@ -179,6 +253,7 @@ namespace GungeonOnline
             int index = (int)nextLevelIndexField.GetValue(__instance);
             string injected = __instance.InjectedLevelName ?? "";
             SendLevelLoad(__instance.CurrentRunSeed, index, injected, startingRun, true);
+            return true;
         }
 
         [HarmonyPostfix]
@@ -193,21 +268,27 @@ namespace GungeonOnline
         // Special floors (secret floors, shortcuts, the tutorial...) load by name.
         [HarmonyPrefix]
         [HarmonyPatch(typeof(GameManager), "LoadCustomLevel")]
-        private static void BeforeLoadCustomLevel(GameManager __instance, string custom)
+        private static bool BeforeLoadCustomLevel(GameManager __instance, string custom)
         {
             // LoadNextLevel calls this itself for injected levels; that was already reported.
             if (insideLoadNextLevel)
-                return;
-            if (IsConnectedJoiner() && !insideFoyerReturn)
-                SaveSync.BeginBorrow();
+                return true;
             bool startingRun = __instance.IsFoyer || departedFoyer || continuingSavedRun;
+            if (IsConnectedJoiner() && !insideFoyerReturn)
+            {
+                if (!startingRun && HoldForHost(__instance, custom))
+                    return false;
+                followLoad = false;
+                SaveSync.BeginBorrow();
+            }
             departedFoyer = false;
             continuingSavedRun = false;
             if (!IsConnectedHost())
-                return;
+                return true;
             if (startingRun || __instance.CurrentRunSeed == 0)
                 __instance.InitializeForRunWithSeed(Random.Range(1, 1000000000));
             SendLevelLoad(__instance.CurrentRunSeed, -1, custom, startingRun, true);
+            return true;
         }
 
         [HarmonyPrefix]
@@ -318,7 +399,39 @@ namespace GungeonOnline
 
         public static void Update()
         {
+            UpdateExitWait();
             FollowToFoyerWhenReady();
+        }
+
+        private static void UpdateExitWait()
+        {
+            if (!waitingAtExit)
+                return;
+            GameManager gm = GameManager.HasInstance ? GameManager.Instance : null;
+            if (gm == null || gm.IsFoyer)
+            {
+                waitingAtExit = false;
+                return;
+            }
+            if (!IsConnectedJoiner())
+            {
+                // The host is gone: don't stay stuck, load where our exit leads.
+                Plugin.Log.LogInfo("No host to wait for anymore: taking our exit.");
+                waitingAtExit = false;
+                bypassWait = true;
+                if (!string.IsNullOrEmpty(waitingCustom))
+                    gm.DelayedLoadCustomLevel(LoadDelay, waitingCustom);
+                else
+                    gm.DelayedLoadNextLevel(LoadDelay);
+                return;
+            }
+            if (Time.realtimeSinceStartup >= waitingToastAt)
+            {
+                waitingToastAt = Time.realtimeSinceStartup + 5f;
+                Toast.Show(waitingForRunStart
+                    ? "Waiting for " + (session.PeerName ?? "the host") + " to start the run..."
+                    : "Waiting for " + (session.PeerName ?? "the host") + " to take the exit...", 6f);
+            }
         }
 
         // follow = false: just let the joiner know where we are (their next run start joins us).
@@ -369,7 +482,7 @@ namespace GungeonOnline
                 Plugin.Log.LogWarning("Host started a level, but you haven't picked a character yet. Take the elevator to join them.");
                 return;
             }
-            if (startingRun && !gm.IsFoyer)
+            if (startingRun && !gm.IsFoyer && !waitingAtExit)
             {
                 // The host started a new run while we're still in the old one.
                 if (WaitingForHost)
@@ -402,7 +515,7 @@ namespace GungeonOnline
 
             // Already on (or loading) exactly this floor, e.g. we took the exit first: loading it again would throw
             // away everything that happened there.
-            if (ourLevel != null && ourLevel.Seed == seed && ourLevel.Index == levelIndex && ourLevel.Custom == customLevel && !gm.IsFoyer)
+            if (!waitingAtExit && ourLevel != null && ourLevel.Seed == seed && ourLevel.Index == levelIndex && ourLevel.Custom == customLevel && !gm.IsFoyer)
             {
                 Plugin.Log.LogInfo("Host loaded the floor we're already on; not loading it again.");
                 return;
@@ -415,6 +528,9 @@ namespace GungeonOnline
             if (Pixelator.Instance != null)
                 Pixelator.Instance.FadeToBlack(LoadDelay, false, 0f);
 
+            waitingAtExit = false;
+            waitingForRunStart = false;
+            followLoad = true;
             if (customLevel.Length > 0 && levelIndex < 0)
             {
                 gm.DelayedLoadCustomLevel(LoadDelay, customLevel);
@@ -444,9 +560,14 @@ namespace GungeonOnline
                 return false;
             Plugin.Log.LogInfo("Reloading the host's floor (index " + hostLevel.Index + ", seed " + hostLevel.Seed + ").");
             ourLevel = hostLevel;
+            // Same seed as now, so the game would skip its run set-up (which special rooms go on which floor), but
+            // building this floor already used that up: the rebuild came out different. Make it redo the set-up.
+            if (forceSeedUpdateField != null)
+                forceSeedUpdateField.SetValue(gm, true);
             gm.InitializeForRunWithSeed(hostLevel.Seed);
             if (Pixelator.Instance != null)
                 Pixelator.Instance.FadeToBlack(LoadDelay, false, 0f);
+            followLoad = true;
             if (hostLevel.Custom.Length > 0 && hostLevel.Index < 0)
             {
                 gm.DelayedLoadCustomLevel(LoadDelay, hostLevel.Custom);

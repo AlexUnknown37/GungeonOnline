@@ -345,8 +345,10 @@ namespace GungeonOnline
                 key += pair.Key + "=" + v + ";";
             }
             Dictionary<string, string> options = CollectOptions();
+            System.Text.StringBuilder sb = new System.Text.StringBuilder(key, 1024);
             foreach (KeyValuePair<string, string> o in options)
-                key += o.Key + "=" + o.Value + ";";
+                sb.Append(o.Key).Append('=').Append(o.Value).Append(';');
+            key = sb.ToString();
             if (!force && loops == lastSentLoop && key == lastSentSettings)
                 return;
             lastSentLoop = loops;

@@ -64,6 +64,8 @@ namespace GungeonOnline
 
         // Our own tags, kept in step with the session (called every frame; only changes when needed).
         private static string lastPresence = null;
+        private static bool lastOnline;
+        private static ulong lastLobby;
 
         public static void UpdateOwnPresence(NetSession session)
         {
@@ -71,10 +73,11 @@ namespace GungeonOnline
                 return;
             bool online = session.Link != null;
             CSteamID lobby = session.Steam != null && session.Steam.Lobby.InLobby ? session.Steam.Lobby.LobbyId : CSteamID.Nil;
-            string presence = online ? Plugin.ModVersion + "|" + lobby.m_SteamID : "";
-            if (presence == lastPresence)
+            if (lastPresence != null && online == lastOnline && lobby.m_SteamID == lastLobby)
                 return;
-            lastPresence = presence;
+            lastPresence = "set";
+            lastOnline = online;
+            lastLobby = lobby.m_SteamID;
             SteamFriends.SetRichPresence(ModKey, online ? Plugin.ModVersion : "");
             // Lets friends use Steam's own "Join Game" on us (the game then starts with +connect_lobby).
             SteamFriends.SetRichPresence("connect", lobby != CSteamID.Nil ? "+connect_lobby " + lobby.m_SteamID : "");

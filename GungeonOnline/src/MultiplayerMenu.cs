@@ -262,6 +262,10 @@ namespace GungeonOnline
                 message = "Others will see you as: " + Plugin.DisplayName();
             }
             GUILayout.EndHorizontal();
+            // Shown whether or not you're connected, so it can be set before joining too.
+            bool names = Tog(Plugin.ShowPartnerName.Value, "  Show partner's name (only on your screen)", label);
+            if (names != Plugin.ShowPartnerName.Value)
+                Plugin.ShowPartnerName.Value = names;
             GUILayout.Space(12);
 
             if (session.Link == null)
