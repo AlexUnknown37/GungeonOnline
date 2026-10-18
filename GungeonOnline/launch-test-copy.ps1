@@ -9,7 +9,8 @@
 # Warning: both copies share the same save files. Stay in the Breach and don't start runs in both.
 # -Test host / -Test join: auto-host on LAN / auto-join 127.0.0.1 once the title screen is up.
 # -Profile OnlineTest: run another Gale profile (no automatic install there).
-param([string]$Name = "", [string]$Test = "", [switch]$AllocProf, [string]$Profile = "Bare", [string]$TestRun = "")
+# -Bot: this copy plays itself in runs (Take a Break, always on).
+param([string]$Name = "", [string]$Test = "", [switch]$AllocProf, [string]$Profile = "Bare", [string]$TestRun = "", [switch]$Bot)
 $ErrorActionPreference = "Stop"
 
 $GameDir = "S:\_Games\Steamapps\steamapps\common\Enter the Gungeon"
@@ -37,6 +38,9 @@ if ($Name -ne "") {
 }
 if ($AllocProf) {
     $gameArgs += @("--gungeon-online-allocprof")
+}
+if ($Bot) {
+    $gameArgs += @("--gungeon-online-bot")
 }
 if ($TestRun -ne "") {
     $gameArgs += @("--gungeon-online-test-run", $TestRun)

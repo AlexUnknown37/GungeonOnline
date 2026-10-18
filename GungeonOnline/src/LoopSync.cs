@@ -104,6 +104,11 @@ namespace GungeonOnline
             try
             {
                 harmony.Patch(performLoad, new HarmonyMethod(typeof(LoopSync), "BeforePerformLoopLoad"));
+                harmony.Patch(triggerLoop, new HarmonyMethod(typeof(LoopSync), "BeforeTriggerLoop"));
+                Type tube = AccessTools.TypeByName("LoopTheGungeon.Util.TimeTubeTransition");
+                startTube = tube != null ? AccessTools.Method(tube, "StartLoopTimeTubeThenLoop") : null;
+                if (startTube != null)
+                    harmony.Patch(startTube, new HarmonyMethod(typeof(LoopSync), "BeforeStartTube"));
                 if (gunfig != null)
                 {
                     HarmonyMethod prefix = new HarmonyMethod(typeof(LoopSync), "HostSetting");
@@ -159,10 +164,111 @@ namespace GungeonOnline
             set { loopField.SetValue(null, value); }
         }
 
+        // ---- The loop's time tube on every screen ----
+        // The host's loop starts with Loop's time-tube animation (~9 s), then loops and loads the new floor. The
+        // host tells the guests when its tube starts; they play the same tube. Their loop step at its end only
+        // counts the loop (once - see BeforeTriggerLoop); their floor load is the host's, followed as usual.
+
+        private static MethodInfo startTube;
+        private static bool playingHostTube;
+        private static int loopTarget = -1;   // joiner: the loop the host's tube leads to
+        private static int loopCountedFor = -1; // joiner: the loop whose start we already ran
+        private static float tubeStartedAt = -100f;
+        private static Dungeonator.Dungeon tubeFloor;
+
+        // The time tube is on screen (from its start until the new floor is in): other players' characters,
+        // still standing on the old floor, are hidden meanwhile.
+        public static bool TubePlaying
+        {
+            get
+            {
+                return GameManager.HasInstance && Time.realtimeSinceStartup - tubeStartedAt < 25f
+                    && GameManager.Instance.Dungeon == tubeFloor;
+            }
+        }
+
+        private static void TubeStarted()
+        {
+            tubeStartedAt = Time.realtimeSinceStartup;
+            tubeFloor = GameManager.HasInstance ? GameManager.Instance.Dungeon : null;
+        }
+
+        private static bool IsJoiner
+        {
+            get { return session != null && session.Link != null && !session.Link.IsHost && session.Status == NetSession.State.Connected; }
+        }
+
+        private static void BeforeStartTube()
+        {
+            TubeStarted();
+            if (playingHostTube || session == null || session.Link == null || !session.Link.IsHost
+                || session.Status != NetSession.State.Connected || loopField == null)
+                return;
+            int target = Loops + 1;
+            Plugin.Log.LogInfo("Loop " + target + " starting: guests play the time tube too.");
+            session.SendReliable(MsgType.LoopStart, delegate (System.IO.BinaryWriter w) { w.Write(target); });
+        }
+
+        public static void OnLoopStart(System.IO.BinaryReader r)
+        {
+            int target = r.ReadInt32();
+            if (!Present || startTube == null || !GameManager.HasInstance)
+                return;
+            GameManager gm = GameManager.Instance;
+            if (gm.IsFoyer || gm.PrimaryPlayer == null || Loops >= target)
+                return;
+            loopTarget = target;
+            LevelSync.ForgetFloor();
+            Plugin.Log.LogInfo("Host's loop " + target + " is starting: playing the time tube.");
+            playingHostTube = true;
+            try
+            {
+                startTube.Invoke(null, new object[] { gm, 0f });
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("Couldn't play the loop's time tube: " + e.Message);
+            }
+            finally
+            {
+                playingHostTube = false;
+            }
+        }
+
+        // Joiner: run the host's loop start once, whichever comes first (the host's loop number arriving or our
+        // tube ending). The loop number itself only goes up in the floor load, which a joiner skips.
+        private static bool BeforeTriggerLoop()
+        {
+            if (!IsJoiner || loopTarget < 0)
+                return true;
+            if (loopCountedFor == loopTarget)
+                return false;
+            loopCountedFor = loopTarget;
+            return true;
+        }
+
         // The joiner's floor load comes from the host (LevelSync); the mod's own one is skipped then.
         private static bool BeforePerformLoopLoad()
         {
-            return !suppressLoopLoad;
+            if (suppressLoopLoad || IsJoiner)
+                return false;
+            // Host, online: the loop goes on with a new run seed (made from the old one and the loop number).
+            // On the old seed every game built a different floor 1: the layout also depends on the run's list of
+            // special rooms, which each game had used up differently. A new seed makes every game set that list
+            // up afresh, so all build the same floor - and each loop still gets a new layout.
+            if (session != null && session.Link != null && session.Link.IsHost && session.Status == NetSession.State.Connected
+                && GameManager.HasInstance)
+            {
+                GameManager gm = GameManager.Instance;
+                unchecked
+                {
+                    uint mixed = (uint)gm.CurrentRunSeed * 2654435761u ^ (uint)(Loops * 40503 + 7);
+                    int seed = (int)(mixed % 999999999u) + 1;
+                    Plugin.Log.LogInfo("Loop " + Loops + ": new run seed " + seed + " (was " + gm.CurrentRunSeed + ") so every game builds the same floors.");
+                    gm.InitializeForRunWithSeed(seed);
+                }
+            }
+            return true;
         }
 
         // Joiner: difficulty settings answer with the host's.
@@ -470,6 +576,8 @@ namespace GungeonOnline
             {
                 // The host just looped: do the same loop start here (minus the floor load, see above).
                 Plugin.Log.LogInfo("Host started loop " + hostLoops + ": looping too.");
+                if (loopTarget != hostLoops)
+                    loopTarget = hostLoops;
                 suppressLoopLoad = true;
                 try
                 {
@@ -485,6 +593,7 @@ namespace GungeonOnline
                 }
             }
             Loops = hostLoops;
+            LevelSync.ForgetFloor();
             Plugin.Log.LogInfo("Loop count set to the host's: " + hostLoops);
         }
     }

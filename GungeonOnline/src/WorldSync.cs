@@ -9,7 +9,8 @@ namespace GungeonOnline
     // Room objects: breakables (barrels, crates, pots, ...) and tables.
     // - Something breaks in our game (walked/rolled into, shot, blown up) → the partner breaks their copy.
     // - A table is flipped → it flips the same way in the partner's game.
-    // - A table is pushed → its new position is sent; the partner's copy slides there.
+    // - A table is pushed → every game pushes its own copy (other players have a pushing body here, TablePush),
+    //   and the pusher's game sends where it went; the others glide their copy to that resting place once it stops.
     // - A table is destroyed (shot apart, fell in a pit) → destroyed in the partner's game too.
     // Objects are matched by kind + name + position. Tables move, so each table is known by where it
     // started ("home"), which is the same in both games because the dungeon is built from the same seed.
@@ -33,6 +34,8 @@ namespace GungeonOnline
             public bool RemotelyKicked; // barrel: the partner kicked it, so they report its roll
             public float MovedAt = -1f;   // when WE last moved it
             public bool SettleSent = true; // its resting place was sent reliably
+            public float RemotePushAt = -1f; // when another player's body last pushed it here
+            public Vector2? Final;           // where the pusher says it ended up (applied once ours stops moving)
         }
 
         private const float SettleTime = 0.4f;     // no movement this long = it came to rest
@@ -220,8 +223,11 @@ namespace GungeonOnline
         {
             if (applyingRemote || !Connected)
                 return;
+            bool known = tables.ContainsKey(__instance);
             TrackTable(__instance);
             TableInfo info = tables[__instance];
+            Plugin.Log.LogInfo("Flipped table '" + BaseName(__instance.gameObject) + "' (home " + info.Home + ", tracked before: " + known
+                + ", pushable now: " + (__instance.specRigidbody != null && __instance.specRigidbody.CanBePushed) + ").");
             string level = LevelSync.CurrentLevelKey();
             string name = BaseName(__instance.gameObject);
             Vector2 home = info.Home;
@@ -327,13 +333,58 @@ namespace GungeonOnline
 
         // ---- Table positions (pushing) ----
 
+        // Where a table or barrel is. A table's root object never moves: pushing moves its physics body, which sits
+        // on a child (with the sprite). So tables are known by their root ("home") but tracked and moved by the body.
+        private static Transform Mover(Component c)
+        {
+            FlippableCover t = c as FlippableCover;
+            if (t != null && t.specRigidbody != null)
+                return t.specRigidbody.transform;
+            return c.transform;
+        }
+
+        private static Vector2 Pos(Component c)
+        {
+            return Mover(c).position;
+        }
+
+        private static void MoveBy(Component c, Vector2 step)
+        {
+            Transform m = Mover(c);
+            m.position += new Vector3(step.x, step.y, 0f);
+            BraveBehaviour b = c as BraveBehaviour;
+            if (b != null && b.specRigidbody != null)
+                b.specRigidbody.Reinitialize();
+            // What the game does after a push (FlippableCover.OnPostMovement): shadow follows, depth updated.
+            FlippableCover t = c as FlippableCover;
+            if (t != null)
+            {
+                if (t.sprite != null)
+                    t.sprite.UpdateZDepth();
+                if (t.shadowSprite != null && t.sprite != null)
+                {
+                    t.shadowSprite.transform.localPosition = t.sprite.transform.localPosition;
+                    t.shadowSprite.UpdateZDepth();
+                }
+            }
+        }
+
+        // For the test key: what we know about a table.
+        public static string Describe(FlippableCover t)
+        {
+            TableInfo info;
+            if (!tables.TryGetValue(t, out info))
+                return "no (" + tables.Count + " tables known)";
+            return "home " + info.Home + ", last " + info.LastKnown + ", moved at " + info.MovedAt + ", remote push at " + info.RemotePushAt;
+        }
+
         private static void TrackTable(FlippableCover t)
         {
             if (t == null || tables.ContainsKey(t))
                 return;
             TableInfo info = new TableInfo();
             info.Home = t.transform.position;
-            info.LastKnown = info.Home;
+            info.LastKnown = Pos(t);
             tables[t] = info;
         }
 
@@ -387,7 +438,8 @@ namespace GungeonOnline
                 ScanTables();
             }
 
-            // Slide things the partner moved toward where they put them.
+            // Slide things other players moved toward where they put them.
+            ApplyFinals();
             Glide(tables);
             Glide(barrels);
 
@@ -415,7 +467,8 @@ namespace GungeonOnline
                     w.Write(kinds[i]);
                     w.Write(BaseName(moved[i].gameObject));
                     w.Write(infos[i].Home.x); w.Write(infos[i].Home.y);
-                    w.Write(moved[i].transform.position.x); w.Write(moved[i].transform.position.y);
+                    Vector2 at = Pos(moved[i]);
+                    w.Write(at.x); w.Write(at.y);
                 }
             });
         }
@@ -460,7 +513,8 @@ namespace GungeonOnline
                     w.Write((byte)Kind.Table);
                     w.Write(BaseName(list[i].gameObject));
                     w.Write(infos[i].Home.x); w.Write(infos[i].Home.y);
-                    w.Write(list[i].transform.position.x); w.Write(list[i].transform.position.y);
+                    Vector2 at = Pos(list[i]);
+                    w.Write(at.x); w.Write(at.y);
                 }
             });
         }
@@ -473,7 +527,7 @@ namespace GungeonOnline
                 TableInfo info = pair.Value;
                 if (t == null || !info.Target.HasValue)
                     continue;
-                Vector2 delta = info.Target.Value - (Vector2)t.transform.position;
+                Vector2 delta = info.Target.Value - Pos(t);
                 if (delta.sqrMagnitude < 0.0001f)
                 {
                     info.Target = null;
@@ -482,10 +536,42 @@ namespace GungeonOnline
                 Vector2 step = delta * Mathf.Min(1f, Time.deltaTime * 10f);
                 if (step.sqrMagnitude < 0.0001f)
                     step = delta;
-                t.transform.position += new Vector3(step.x, step.y, 0f);
-                if (t.specRigidbody != null)
-                    t.specRigidbody.Reinitialize();
-                info.LastKnown = t.transform.position;
+                MoveBy(t, step);
+                info.LastKnown = Pos(t);
+            }
+        }
+
+        // Who is closest to this table: us, or another player? (The one touching it is the one pushing.)
+        private static bool PushedByOther(Component table)
+        {
+            PlayerController me = GameManager.Instance.PrimaryPlayer;
+            BraveBehaviour b = table as BraveBehaviour;
+            Vector2 c = b != null && b.specRigidbody != null ? b.specRigidbody.UnitCenter : (Vector2)table.transform.position;
+            float mine = me != null ? Vector2.Distance(me.specRigidbody != null ? me.specRigidbody.UnitBottomCenter : (Vector2)me.transform.position, c) : float.MaxValue;
+            for (int i = 0; i < Protocol.MaxPlayers; i++)
+            {
+                Vector2 feet;
+                if (TablePush.TryGetFeet(i, out feet) && Vector2.Distance(feet, c) < mine)
+                    return true;
+            }
+            return false;
+        }
+
+        // Tables other players pushed here: once our copy has stopped moving, glide it to where the pusher's game
+        // says it came to rest.
+        private static void ApplyFinals()
+        {
+            float now = Time.realtimeSinceStartup;
+            foreach (KeyValuePair<FlippableCover, TableInfo> pair in tables)
+            {
+                TableInfo info = pair.Value;
+                if (!info.Final.HasValue || pair.Key == null)
+                    continue;
+                if (info.RemotePushAt >= 0f && now - info.RemotePushAt < SettleTime)
+                    continue; // still being pushed here
+                if ((Pos(pair.Key) - info.Final.Value).sqrMagnitude > TableMoved * TableMoved)
+                    info.Target = info.Final;
+                info.Final = null;
             }
         }
 
@@ -496,9 +582,22 @@ namespace GungeonOnline
             {
                 if (pair.Key == null || pair.Value.Target.HasValue || pair.Value.RemotelyKicked)
                     continue;
-                if (((Vector2)pair.Key.transform.position - pair.Value.LastKnown).sqrMagnitude > TableMoved * TableMoved)
+                if ((Pos(pair.Key) - pair.Value.LastKnown).sqrMagnitude > TableMoved * TableMoved)
                 {
-                    pair.Value.LastKnown = pair.Key.transform.position;
+                    bool startOfMove = Time.realtimeSinceStartup - Mathf.Max(pair.Value.MovedAt, pair.Value.RemotePushAt) > 1f;
+                    if (kind == (byte)Kind.Table && PushedByOther(pair.Key))
+                    {
+                        if (startOfMove)
+                            Plugin.Log.LogInfo("Table '" + BaseName(pair.Key.gameObject) + "' (home " + pair.Value.Home + ") is being pushed here by another player.");
+                        // Another player's body pushed our copy: their game reports where it goes.
+                        pair.Value.LastKnown = Pos(pair.Key);
+                        pair.Value.RemotePushAt = Time.realtimeSinceStartup;
+                        continue;
+                    }
+                    if (startOfMove)
+                        Plugin.Log.LogInfo((kind == (byte)Kind.Table ? "Table '" : "Barrel '") + BaseName(pair.Key.gameObject) + "' (home " + pair.Value.Home
+                            + ") moved by us; reporting its position.");
+                    pair.Value.LastKnown = Pos(pair.Key);
                     pair.Value.MovedAt = Time.realtimeSinceStartup;
                     pair.Value.SettleSent = false;
                     moved.Add(pair.Key);
@@ -507,6 +606,8 @@ namespace GungeonOnline
                 }
             }
         }
+
+        private static float nextMissingLog;
 
         public static void OnTablePositions(BinaryReader r)
         {
@@ -531,12 +632,25 @@ namespace GungeonOnline
                 {
                     FlippableCover t = TableAtHome(name, home);
                     if (t == null || t.IsBroken)
+                    {
+                        if (t == null && Time.realtimeSinceStartup >= nextMissingLog)
+                        {
+                            nextMissingLog = Time.realtimeSinceStartup + 2f;
+                            Plugin.Log.LogWarning("Got a position for table '" + name + "' (home " + home + ") but we have no such table (" + tables.Count + " known).");
+                        }
                         continue;
+                    }
                     TableInfo info = tables[t];
                     // We're pushing it ourselves right now: ours wins until it rests.
                     if (info.MovedAt >= 0f && Time.realtimeSinceStartup - info.MovedAt < SettleTime)
                         continue;
-                    if (((Vector2)t.transform.position - pos).sqrMagnitude > TableMoved * TableMoved)
+                    // Their body is pushing our copy too: let it play out, then settle where they say.
+                    if (info.RemotePushAt >= 0f && Time.realtimeSinceStartup - info.RemotePushAt < 2f)
+                    {
+                        info.Final = pos;
+                        continue;
+                    }
+                    if ((Pos(t) - pos).sqrMagnitude > TableMoved * TableMoved)
                         info.Target = pos;
                 }
             }

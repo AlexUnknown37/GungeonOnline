@@ -14,10 +14,10 @@ namespace GungeonOnline
     //   soon as they appear when you enter that room later.
     // - Whoever is alive in a room sends its enemies' positions and health ~10x a second; the other game
     //   glides drifted enemies back and never lets an enemy have more health than the sender's copy.
-    // Each game's enemies still choose their own target and attacks (aimed at the player in that game).
+    // Which attack an enemy starts, and at whom, is decided by the game in charge of the room (see AttackSync).
     public static class EnemySync
     {
-        private const float StateInterval = 0.1f;
+        private const float StateInterval = 1f / 15f;
         private const float KillHealth = 1000000f;
 
         private static NetSession session;
@@ -66,7 +66,9 @@ namespace GungeonOnline
             killQueue.Clear();
             queuedAt.Clear();
             corrections.Clear();
+            driven.Clear();
             clearedSent.Clear();
+            clearedByOthers.Clear();
         }
 
         // ---- IDs ----
@@ -94,6 +96,57 @@ namespace GungeonOnline
                 killQueue.Add(enemy); // the partner already killed this one
                 queuedAt[enemy] = Time.realtimeSinceStartup;
             }
+        }
+
+        public static bool TryGetId(AIActor a, out int id)
+        {
+            id = 0;
+            return a != null && idOf.TryGetValue(a, out id);
+        }
+
+        public static AIActor ById(int id)
+        {
+            AIActor a;
+            return byId.TryGetValue(id, out a) ? a : null;
+        }
+
+        // Does our game lead this enemy (decide its attacks)? Yes when we're in charge of its room, or when
+        // nobody is online.
+        public static bool LeadsEnemy(AIActor a)
+        {
+            if (!Connected || a == null)
+                return true;
+            RoomHandler room = a.ParentRoom;
+            if (Time.frameCount != leadFrame)
+            {
+                leadFrame = Time.frameCount;
+                leads.Clear();
+            }
+            bool lead;
+            if (room == null)
+                return true;
+            if (!leads.TryGetValue(room, out lead))
+            {
+                lead = InCharge(room) && !LowerPlayerInRoom(room);
+                leads[room] = lead;
+            }
+            return lead;
+        }
+        private static readonly Dictionary<RoomHandler, bool> leads = new Dictionary<RoomHandler, bool>();
+        private static int leadFrame = -1;
+
+        // Put an enemy right where the leader's game has it (before copying an attack, so it starts from there).
+        public static void PlaceAt(AIActor a, Vector2 center)
+        {
+            if (a == null || a.specRigidbody == null)
+                return;
+            Vector2 delta = center - a.specRigidbody.UnitCenter;
+            if (delta.sqrMagnitude < 0.01f)
+                return;
+            a.transform.position += new Vector3(delta.x, delta.y, 0f);
+            a.specRigidbody.Reinitialize();
+            corrections.Remove(a);
+            Release(a);
         }
 
         private static AIActor Find(int id, string guid)
@@ -250,7 +303,37 @@ namespace GungeonOnline
         private class Correction
         {
             public Vector2 Target;
+            public Vector2 Velocity;
             public float ReceivedAt;
+        }
+
+        // The same number for the same kind of enemy in every game (string.GetHashCode isn't promised to be).
+        private static int KindHash(string guid)
+        {
+            unchecked
+            {
+                int h = (int)2166136261;
+                if (guid != null)
+                {
+                    foreach (char ch in guid)
+                        h = (h ^ ch) * 16777619;
+                }
+                return h;
+            }
+        }
+
+        // Enemies whose walking we drive from the leading game's reports (their own movement is switched off).
+        private static readonly HashSet<AIActor> driven = new HashSet<AIActor>();
+        private const float FollowGain = 5f;       // how hard a driven enemy steers back onto the reported path
+
+        private static void Release(AIActor a)
+        {
+            if (!driven.Remove(a) || a == null)
+                return;
+            a.BehaviorOverridesVelocity = false;
+            a.BehaviorVelocity = Vector2.zero;
+            if (a.behaviorSpeculator != null)
+                a.behaviorSpeculator.PreventMovement = false;
         }
         private static readonly Dictionary<AIActor, Correction> corrections = new Dictionary<AIActor, Correction>();
         private const float SnapDistance = 4f;      // further than this: jump
@@ -268,7 +351,32 @@ namespace GungeonOnline
         private static bool InCharge(RoomHandler room)
         {
             PlayerController me = Me;
-            return me != null && !LocalIsGhost && room != null && me.CurrentRoom == room;
+            if (me != null && !LocalIsGhost && room != null && me.CurrentRoom == room)
+                return true;
+            // The host's game also runs a stand-in bot: where it fights alone, the host's game is in charge.
+            PlayerController bot = StandIn.Active ? StandIn.Player : null;
+            return room != null && bot != null && !bot.IsGhost && bot.healthHaver != null && !bot.healthHaver.IsDead
+                && bot.CurrentRoom == room;
+        }
+
+        // Is a player with a lower number (the host first) alive in this room too? Then their game reports its
+        // enemies and ours doesn't, so the other games don't get two different reports.
+        private static bool LowerPlayerInRoom(RoomHandler room)
+        {
+            if (room == null || GameManager.Instance.Dungeon == null)
+                return false;
+            string level = LevelSync.CurrentLevelKey();
+            foreach (RemotePlayerState p in session.Remotes)
+            {
+                if (p.Slot >= session.LocalSlot || !p.HasPlayer || p.IsDead || p.Scene != level)
+                    continue;
+                Vector2 f = p.FeetPosition;
+                RoomHandler theirs = GameManager.Instance.Dungeon.data.GetAbsoluteRoomFromPosition(
+                    new IntVector2(Mathf.FloorToInt(f.x), Mathf.FloorToInt(f.y)));
+                if (theirs == room)
+                    return true;
+            }
+            return false;
         }
 
         public static void Update()
@@ -299,6 +407,8 @@ namespace GungeonOnline
 
             ApplyCorrections();
             UnsealIfStuck(now);
+            KeepClearedRoomOpen(now);
+            SendClearedRoomsToArrivals();
 
             if (now < nextStateAt)
                 return;
@@ -310,7 +420,7 @@ namespace GungeonOnline
             {
                 AIActor a = pair.Value;
                 if (a != null && a.healthHaver != null && !a.healthHaver.IsDead && a.gameObject.activeInHierarchy
-                    && InCharge(a.ParentRoom))
+                    && InCharge(a.ParentRoom) && !LowerPlayerInRoom(a.ParentRoom))
                 {
                     ids.Add(pair.Key);
                     actors.Add(a);
@@ -329,6 +439,10 @@ namespace GungeonOnline
                     w.Write(ids[i]);
                     w.Write(p.x); w.Write(p.y);
                     w.Write(actors[i].healthHaver.GetCurrentHealth());
+                    w.Write((byte)TargetSync.SlotOfTarget(actors[i]));
+                    Vector2 v = actors[i].specRigidbody != null ? actors[i].specRigidbody.Velocity : Vector2.zero;
+                    w.Write(v.x); w.Write(v.y);
+                    w.Write(KindHash(actors[i].EnemyGuid));
                 }
             });
         }
@@ -346,17 +460,27 @@ namespace GungeonOnline
                 int id = r.ReadInt32();
                 Vector2 theirPos = new Vector2(r.ReadSingle(), r.ReadSingle());
                 float theirHealth = r.ReadSingle();
+                int theirTarget = r.ReadByte();
+                Vector2 theirVelocity = new Vector2(r.ReadSingle(), r.ReadSingle());
+                int theirKind = r.ReadInt32();
 
                 AIActor a;
                 if (!byId.TryGetValue(id, out a) || a == null || a.healthHaver == null || a.healthHaver.IsDead)
                     continue;
-                // If we're alive in that room too, the host's copy wins; otherwise the sender is in charge.
-                if (InCharge(a.ParentRoom) && session.Link.IsHost)
+                // Same number but another kind of enemy: the games numbered this room's enemies differently. Leave it
+                // alone rather than drag the wrong enemy around.
+                if (KindHash(a.EnemyGuid) != theirKind)
+                    continue;
+                // If we are alive in that room too, the lower player number wins (the host first); otherwise the
+                // sender is in charge.
+                if (InCharge(a.ParentRoom) && session.LocalSlot < session.From)
                     continue;
 
                 // Health only ever goes down to theirs (our own hits may not have reached them yet).
                 if (theirHealth < a.healthHaver.GetCurrentHealth())
                     a.healthHaver.ForceSetCurrentHealth(theirHealth);
+                // Chase the same player as in the sender's game.
+                TargetSync.Force(a, theirTarget);
 
                 Correction c;
                 if (!corrections.TryGetValue(a, out c))
@@ -365,6 +489,7 @@ namespace GungeonOnline
                     corrections[a] = c;
                 }
                 c.Target = theirPos;
+                c.Velocity = theirVelocity;
                 c.ReceivedAt = now;
             }
         }
@@ -386,18 +511,51 @@ namespace GungeonOnline
                     done.Add(a);
                     continue;
                 }
-                Vector2 delta = pair.Value.Target - a.specRigidbody.UnitCenter;
+                Correction c = pair.Value;
+                // Where the leading game has it now: its last report moved on by its velocity (a short way only).
+                Vector2 predicted = c.Target + c.Velocity * Mathf.Min(now - c.ReceivedAt, 0.2f);
+                Vector2 delta = predicted - a.specRigidbody.UnitCenter;
                 float dist = delta.magnitude;
+                if (dist > SnapDistance)
+                {
+                    a.transform.position += new Vector3(delta.x, delta.y, 0f);
+                    a.specRigidbody.Reinitialize();
+                    continue;
+                }
+                BehaviorSpeculator spec = a.behaviorSpeculator;
+                bool attacking = spec != null && spec.ActiveContinuousAttackBehavior != null;
+                if (spec != null && !attacking)
+                {
+                    // Walk it along the leader's path at the leader's pace (walking animations and walls included),
+                    // instead of letting our copy wander its own way and pulling it back.
+                    if (!driven.Contains(a))
+                    {
+                        driven.Add(a);
+                        spec.PreventMovement = true;
+                    }
+                    Vector2 v = c.Velocity + delta * FollowGain;
+                    float max = Mathf.Max(c.Velocity.magnitude, a.MovementSpeed) * 1.5f + 2f;
+                    if (v.magnitude > max)
+                        v = v.normalized * max;
+                    a.BehaviorOverridesVelocity = true;
+                    a.BehaviorVelocity = dist < 0.05f && c.Velocity.sqrMagnitude < 0.01f ? Vector2.zero : v;
+                    continue;
+                }
+                // Mid-attack (a charge, a leap...): the attack moves it; only gently pull a drift back.
+                Release(a);
                 if (dist < SettleDistance)
                     continue;
-                Vector2 step = dist > SnapDistance ? delta : delta * Mathf.Min(1f, Time.deltaTime * PullSpeed);
+                Vector2 step = delta * Mathf.Min(1f, Time.deltaTime * PullSpeed);
                 a.transform.position += new Vector3(step.x, step.y, 0f);
                 a.specRigidbody.Reinitialize();
             }
             if (done != null)
             {
                 foreach (AIActor a in done)
+                {
                     corrections.Remove(a);
+                    Release(a);
+                }
             }
         }
 
@@ -431,6 +589,85 @@ namespace GungeonOnline
         private static bool applyingRemoteRoom;
         // Each room's "cleared" is sent once per floor (a room that kept re-opening sent it dozens of times).
         private static readonly HashSet<int> clearedSent = new HashSet<int>();
+        // Rooms another player cleared: they stay open and empty here. (Killing the leftovers could start the
+        // room's next wave of reinforcements in our copy, which locked it again and kept us from following the
+        // others to their next fight.)
+        private static readonly HashSet<int> clearedByOthers = new HashSet<int>();
+        private static float nextClearedCheckAt;
+
+        // Host: a player who arrives on our floor later (rejoined, came back from the Breach) builds it fresh, with every
+        // room full again. Tell them which rooms are already cleared.
+        private static readonly Dungeon[] clearedListSentFor = new Dungeon[Protocol.MaxPlayers];
+
+        private static void SendClearedRoomsToArrivals()
+        {
+            if (!session.Link.IsHost || GameManager.Instance.Dungeon == null)
+                return;
+            Dungeon d = GameManager.Instance.Dungeon;
+            string level = LevelSync.CurrentLevelKey();
+            for (int slot = 1; slot < clearedListSentFor.Length; slot++)
+            {
+                RemotePlayerState p = session.Players[slot];
+                if (!p.Connected || !p.HasPlayer || p.Scene != level)
+                {
+                    clearedListSentFor[slot] = null;
+                    continue;
+                }
+                if (clearedListSentFor[slot] == d)
+                    continue;
+                clearedListSentFor[slot] = d;
+                List<int> rooms = new List<int>(clearedSent);
+                foreach (int r in clearedByOthers)
+                {
+                    if (!rooms.Contains(r))
+                        rooms.Add(r);
+                }
+                if (rooms.Count == 0)
+                    continue;
+                Plugin.Log.LogInfo(p.Name + " arrived on our floor: telling them the " + rooms.Count + " rooms already cleared.");
+                foreach (int r in rooms)
+                {
+                    int roomIndex = r;
+                    session.SendReliableTo(slot, MsgType.RoomCleared, delegate (BinaryWriter w)
+                    {
+                        w.Write(level);
+                        w.Write(roomIndex);
+                    });
+                }
+            }
+        }
+
+        private static void KeepClearedRoomOpen(float now)
+        {
+            if (clearedByOthers.Count == 0 || now < nextClearedCheckAt)
+                return;
+            nextClearedCheckAt = now + 0.5f;
+            PlayerController me = Me;
+            RoomHandler room = me != null ? me.CurrentRoom : null;
+            if (room == null || !room.IsSealed || GameManager.Instance.Dungeon == null)
+                return;
+            int index = GameManager.Instance.Dungeon.data.rooms.IndexOf(room);
+            if (index < 0 || !clearedByOthers.Contains(index))
+                return;
+            int killed = 0;
+            List<AIActor> left = room.GetActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear);
+            if (left != null)
+            {
+                foreach (AIActor a in new List<AIActor>(left))
+                {
+                    if (a != null && a.healthHaver != null && !a.healthHaver.IsDead)
+                    {
+                        KillFromPartner(a);
+                        killed++;
+                    }
+                }
+            }
+            Plugin.Log.LogInfo("Room " + room.GetRoomName() + " was cleared by another player but locked again here ("
+                + killed + " enemies left); opening it.");
+            applyingRemoteRoom = true;
+            try { room.UnsealRoom(); }
+            finally { applyingRemoteRoom = false; }
+        }
 
         [HarmonyPostfix]
         [HarmonyPatch(typeof(RoomHandler), "UnsealRoom")]
@@ -463,6 +700,7 @@ namespace GungeonOnline
                 return;
             RoomHandler room = rooms[roomIndex];
             CheckFloor();
+            clearedByOthers.Add(roomIndex);
 
             // Every enemy we know in that room counts as dead from now on (also ones that haven't spawned yet).
             foreach (KeyValuePair<AIActor, int> pair in idOf)
@@ -495,19 +733,25 @@ namespace GungeonOnline
 
         // ---- Bringing ghosts along ----
 
-        // When a room locks for a fight and our partner is a ghost, bring them into the room.
+        // When a room locks for a fight, bring the others into it: ghosts always, living players for the boss fight
+        // and, with the host's "teleport to fights" rule on, for every fight.
         [HarmonyPostfix]
         [HarmonyPatch(typeof(RoomHandler), "SealRoom")]
         private static void AfterSealRoom(RoomHandler __instance)
         {
             PlayerController me = Me;
-            if (!Connected || me == null || LocalIsGhost || me.CurrentRoom != __instance)
+            if (!Connected || me == null || LocalIsGhost || GameManager.Instance.Dungeon == null)
+                return;
+            // The room may lock before the game updates which room we're in, so also check where we stand.
+            Vector2 pos = me.CenterPosition;
+            RoomHandler standing = GameManager.Instance.Dungeon.data.GetAbsoluteRoomFromPosition(
+                new IntVector2(Mathf.FloorToInt(pos.x), Mathf.FloorToInt(pos.y)));
+            if (me.CurrentRoom != __instance && standing != __instance)
                 return;
             bool bossRoom = __instance.area != null && __instance.area.PrototypeRoomCategory == PrototypeDungeonRoom.RoomCategory.BOSS;
-            // A ghost partner always comes along; a living one too when it's the boss fight.
-            if (!DeathSync.PartnerIsGhost && !bossRoom)
+            if (!DeathSync.PartnerIsGhost && !bossRoom && !session.FightPull)
                 return;
-            Vector2 pos = me.CenterPosition;
+            Plugin.Log.LogInfo("Fight started in " + __instance.GetRoomName() + (bossRoom ? " (boss)" : "") + ": calling the others here.");
             string level = LevelSync.CurrentLevelKey();
             session.SendReliable(MsgType.PullGhost, delegate (BinaryWriter w)
             {
@@ -522,13 +766,28 @@ namespace GungeonOnline
             PlayerController me = Me;
             if (me == null || level != LevelSync.CurrentLevelKey())
                 return;
+            Plugin.Log.LogInfo(session.PeerName + " started a fight" + (session.FightPull ? "" : " (teleport to fights is off)") + ".");
             if (!me.IsGhost)
             {
-                // A boss fight started where the partner is: everyone goes.
-                if (me.healthHaver.IsDead || (me.CurrentRoom != null && me.CurrentRoom.area != null
-                    && me.CurrentRoom.area.PrototypeRoomCategory == PrototypeDungeonRoom.RoomCategory.BOSS))
+                RoomHandler fightRoom = GameManager.Instance.Dungeon != null
+                    ? GameManager.Instance.Dungeon.data.GetAbsoluteRoomFromPosition(new IntVector2(Mathf.FloorToInt(pos.x), Mathf.FloorToInt(pos.y)))
+                    : null;
+                bool boss = fightRoom != null && fightRoom.area != null && fightRoom.area.PrototypeRoomCategory == PrototypeDungeonRoom.RoomCategory.BOSS;
+                // Living players go for the boss fight, or any fight with the host's "teleport to fights" rule.
+                // Not when already there, dead, or in a boss room of our own.
+                if (!boss && !session.FightPull)
                     return;
-                Toast.Show("Boss fight! Bringing you to your partner.", 3f);
+                string skip = me.healthHaver.IsDead ? "we're dead"
+                    : fightRoom != null && me.CurrentRoom == fightRoom ? "we're already in that room"
+                    : me.CurrentRoom != null && me.CurrentRoom.IsSealed && me.CurrentRoom.area != null
+                        && me.CurrentRoom.area.PrototypeRoomCategory == PrototypeDungeonRoom.RoomCategory.BOSS ? "we're in a boss fight"
+                    : null;
+                if (skip != null)
+                {
+                    Plugin.Log.LogInfo("Not joining that fight: " + skip + ".");
+                    return;
+                }
+                Toast.Show((boss ? "Boss fight! " : "Fight! ") + "Bringing you to " + session.PeerName + ".", 3f);
             }
             PlayerWarp.ScheduleGhostPull();
         }

@@ -2,32 +2,38 @@
 
 *Super Duper Alpha please dont look yuck yuck*
 
-**Online co-op for Enter the Gungeon** — a BepInEx mod that lets two players play together over **Steam** or **LAN**.
+**Online co-op for Enter the Gungeon** — a BepInEx mod that lets **up to 4 players** play together over **Steam** or **LAN**.
 
 > ## ⚠️ Very early alpha — side project
 >
 > This is a **hobby side project**, built in spare time, and it is **pre-alpha quality**.
 > Expect bugs, desyncs, crashes, softlocks and features that only half work.
-> Things change (and break) between versions, and both players must run the **exact same version**.
+> Things change (and break) between versions, and every player must run the **exact same version**.
 > There is no support, no schedule and no guarantee it will ever be finished.
 > **Back up your save files before trying it.**
 
 ## What works (roughly)
 
-- Steam lobby hosting/invites(not tested), or LAN by IP / LAN search; pick your display name
-- Seeing your partner: character, animations, gun, shadow, pet, ghost glow, status effects (fire, poison...)
-- Host-led runs: same seed and floors for both players, run start/end and death-screen restarts
+- Steam lobby hosting/invites (not tested), or LAN by IP / LAN search; pick your display name
+- Seeing the other players: character, animations, gun, shadow, pet, ghost glow, status effects, name tags
+- Party list on the right side of the screen with every player's character, hearts and armor
+- Host-led runs: same seed and floors for everyone, run start/end and death-screen restarts
 - Player bullets, thrown items (Molotovs, grenades), blanks, floor goop
-- Shared enemy health/deaths, enemies targeting either player, room clears
-- Co-op deaths: ghost mode, revive from chests, game over when both are down
-- Tables (flip/push), breakables, rolling barrels, petting the partner's dog, shared pause, optional PvP
+- Enemies: shared health and deaths; the game in charge of a room decides enemy attacks, targets and movement
+- Teleport to fights, tougher enemies with more players, shared money and keys, optional split money
+- Co-op deaths: ghost mode, revive from chests or the Cultist's Friendship Cookie, game over when everyone is down
+- Players who drop out keep playing as a bot with their gear until they rejoin; Take a Break lets a bot play for you
+- Tables (flip/push), breakables, rolling barrels, petting other players' dogs, shared pause, optional PvP
+- Loop The Gungeon: loops (with the time tube) and loop difficulty shared with everyone
 
 All of it is experimental. See `MODLOG.md` for the detailed (and honest) development journal, including known gaps.
 
 ## Not done / known problems
 
-- Enemy *attacks* are simulated separately in each game (only targeting, health and deaths are shared)
+- Enemy bullets with random spread or homing can still differ a little between games
 - Items dropped on death aren't synced
+- Small breakables (bushes, candles) sometimes stay standing in another player's game
+- Only one bot can stand in for a dropped player at a time (the game has two player slots)
 - Many items, guns, bosses and special rooms have never been tested
 - Performance and network smoothness still need work
 
@@ -35,7 +41,7 @@ All of it is experimental. See `MODLOG.md` for the detailed (and honest) develop
 
 - Enter the Gungeon (Steam version for Steam play)
 - [BepInExPack for EtG](https://thunderstore.io/c/enter-the-gungeon/) (a mod manager like Gale installs it)
-- Both players on the same Gungeon Online version
+- Every player on the same Gungeon Online version
 
 ## Building
 
@@ -54,4 +60,8 @@ MIT
 
 ## Support
 
-If you enjoy this side project, you can support me on Ko-fi: https://ko-fi.com/alexjustalex
+If you enjoy this side project, you can support me or follow my other projects:
+
+- Ko-fi: https://ko-fi.com/alexjustalex
+- Patreon: https://patreon.com/AlexanderVazquez
+- GitHub: https://github.com/AlexUnknown37

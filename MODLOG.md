@@ -533,3 +533,134 @@ BepInEx plugin (loader API) + Steamworks.NET that the game already ships.
   now sets m_forceSeedUpdate first. Retest: 23-room floor matched (CD698E77); no jungle tree and no reload on that
   floor, so both fixes are untested in play. Pre-existing, not ours: Emulate the Gungeon MissingMethodException
   (ETGMod Chest DOnPreOpen), AudioAnimatorListener.Start NRE.
+- 0.102-0.104 (protocol 33): Up to 4 players (Protocol.MaxPlayers). Slots: host 0, guests 1-3. Every message is
+  [type][sender slot][body] (Protocol.LocalSlot). Transport is multi-peer by slot (Send(slot|Everyone), OnPacket(slot,..),
+  OnLost(slot,..), DropPeer(slot)); SteamLink keeps a CSteamID per slot, LanLink a Peer (endpoint, seqs, unacked) per
+  slot; the host puts newcomers in the lowest free slot. NetSession: Players[slot] (Name, Connected, PingMs, LastHeard);
+  host stamps the sender slot, handles the message, then relays it to the other connected guests (not Hello/Ping/Pong/Bye/
+  Inventory/InventoryRequest/AtExit; unreliable types relayed unreliably). Hello carries the guest's slot back; Roster (47)
+  lists everyone; per-guest timeouts. While a message is handled, From/Remote/PeerName = its sender; during a newcomer's
+  hello every Send goes only to them (onlyTo); SendReliableTo for InventoryRestore. Per-player: puppets/pets
+  (Plugin.Puppets/Pets), name tags, map markers, enemy target bodies (closest player, TargetSync.BodyOf), orbitals, beams,
+  bullet ids (netId*4+slot), dropped-gun ids, Master Round hits, pause (anyone), deaths (game over when everyone is down,
+  a chest revives all ghosts), petting (PetStart/Stop carry the owner slot), teleport (sender or closest). Enemy states:
+  the lowest slot alive in a room reports. Money pickups count 1/players-in-run. Test: three LAN copies (host Rogue,
+  Guest1 Robot, Guest2 Guide joining mid-run via the elevator; test-run guests now depart once the host is in a run):
+  slots 1/2/3, all floors match (CFC40EB9), every game shows the other two characters + map icons, 0 exceptions.
+  tools/hold-key.ps1 holds a key in a copy (walking). Not yet tested: Steam with 3+, combat/deaths/chests with 3.
+- 0.105-0.106: Rules/TeleportToFights (default on, host rule sent in Rules as a 3rd bool): when a player's room seals
+  (RoomHandler.SealRoom) they send PullGhost; receivers that are alive warp to the sender (PlayerWarp, 1 s delay) unless
+  already in that room, dead, or in a boss room. Toggle under the name toggle in the Multiplayer menu and the F8 window
+  (guests see the host's choice). Multiplayer menu toggles now show [ON]/[OFF] (the label style draws no checkbox);
+  "Half money" shown as "Split money". Verified: guest log "teleport to fights on", F8 shows it. Fight warp itself not
+  tested in a real fight yet.
+- 0.107: Tables pushed client-side: TablePush.cs gives every other player a "feet" SpeculativeRigidbody (copy of our
+  PlayerCollider box, 14x4 px; CanPush, CollideWithOthers, no tilemap) that follows their smoothed transform by
+  Velocity (jumps when >2 tiles off), so the physics engine pushes flipped tables (FlippableCover sets CanBePushed)
+  in every game. OnPreRigidbodyCollision skips everything that isn't a FlippableCover (PhysicsEngine calls both
+  bodies' callbacks, so enemies/bullets/us pass through). WorldSync: a table that moved while another player's feet
+  were closer than ours is their push (RemotePushAt) and isn't reported by us; positions from the pusher arriving
+  then are kept as Final and glided to 0.4 s after our copy stops. Seen before: 'Partner broke Table ... closest 1.99
+  away' (push not synced). Fight teleport fixed: SealRoom check also uses the room we stand in (CurrentRoom may lag);
+  logs 'Fight started in X' / 'X started a fight'. Verified: host walked into Castle_Joe_Square_011, guest got
+  'Fight! Bringing you to Host.' and warped in.
+- 0.108: Friendship Cookie (HealPlayerItem.DoesRevive): online CanBeUsed only while another player on our floor is a
+  ghost; DoEffect sends Revive (now with a target slot byte, NoSlot = all ghosts) to the closest ghost, who comes back
+  at the user (ResurrectFromChest path, no chest). Untested in game.
+- 0.109 (not yet rebuilt with the next three): 4-copy LAN test (Host Rogue, Guest1 Robot, Guest2 Guide, Guest3 Convict):
+  all connected (slots 1-4), all floors matched, fight teleport pulled all 3 others in 4 fights. Found:
+  (1) Guest3 timed out on the host but kept "playing": the host dropped its slot, then ignored its non-hello packets,
+  while the host's pings (sent to every link peer) kept Guest3 from timing out itself; on LAN the new Peer also
+  restarted reliable numbering at 0 so nothing got through. Fix: host answers packets from a not-hello'd slot with
+  Hello(askBack=true) (1/s); the guest then says hello again. LanLink reliable packets/acks now carry a per-peer
+  random epoch; a new epoch resets the receive numbering. (2) A cleared room locked again in some games
+  (reinforcement waves after the leftovers were killed), so those players couldn't follow to the next fight (warp
+  refuses while in a locked fight). Fix: rooms another player cleared are remembered per floor and kept open/emptied
+  (KeepClearedRoomOpen, every 0.5 s). (3) Tables: no "touched table"/"moved by us" lines at all; still unexplained.
+  Noise: "no unbroken match" warnings flood with 4 players (same object broken in every game).
+- 0.110-0.114: TABLES FIXED. A FlippableCover's SpeculativeRigidbody (and sprite) is on a CHILD ("Table_Vertical"
+  under "Table_Vertical(Clone)"); pushing moves the child, the root never moves. WorldSync watched/moved the root, so
+  pushes were never seen; TablePush skipped tables because GetComponent<FlippableCover>() on the child is null.
+  Now: tables are identified by the root ("home") but tracked/sent/glided by the body's transform (Mover/Pos/MoveBy,
+  MoveBy also does OnPostMovement's shadow + z-depth); TablePush uses GetComponentInParent. Walking into a flipped
+  table pushes it (slides, ~8 tiles in 2.5 s). Verified 2 copies: host flipped + pushed, both games' body at
+  (156.6, 88.5), guest log "Player 1's body touched table". Open: guest's game logged flipping an unrelated table
+  (Table_Horizontal, home 166,97) on its own once - watch for it.
+  Test keys (test copies only): K = warp 2 tiles below the nearest unflipped table (Resources.FindObjectsOfTypeAll:
+  unvisited rooms are inactive), L = log health + that table's state. tools/hold-key.ps1, tools/roll.ps1.
+  Skip Intro bug (garbled guest heart bar, Robot turned into Marine): the intro lives in tt_foyer; a test guest
+  reached the Breach before the intro ever ran, the intro then started at run start and our skip made the game
+  quick-start with the last character. Skip Intro 0.4: only while no player exists, flags reset after. Verified.
+- 0.115-0.116: Rejoin from the Breach. A guest that went back to the Breach while still connected picked any
+  character, got its old items added (the new character's active item dropped: one slot) - the old-character
+  pick only ran on reconnect (RejoinOffer). Now the guest remembers its own run character + seed while in a run;
+  back in the Breach while the host is still in that run, it sets rejoinCharacter itself, so UpdateRejoin picks the
+  old character on the select screen and departs into the host's run; items come back via InventoryRequest.
+  Floor state for late arrivals: the host sends a player who arrives on its floor (slot's Scene becomes ours) every
+  room already cleared (clearedSent + clearedByOthers) as RoomCleared (SendReliableTo) - KeepClearedRoomOpen empties
+  them on entry. Cookie revive verified in play (guest used Friendship Cookie, host revived).
+  Test key B = back to the Breach. Verified: guest B -> "rejoin as PlayerRobot" -> picked -> rejoined, host
+  "sending back their items" + "1 rooms already cleared", host shows Robot again, floor matches.
+- 0.117-0.124 (protocol 34): Autopilot.cs = "Take a Break". Drives our own player by answering the player-0
+  GungeonActions in a PlayerActionSet.Update prefix (CommitWithValue per action, then the internal one/two-axis
+  Update by reflection); aims with PlayerController.forceAimPoint. Brain: closest visible enemy (lead 0.15 s, keep
+  3.5-8 tiles, strafe, flip side every 1.2-2.5 s), sidestep/roll from bullets whose line passes within 1.1 tiles
+  (roll if < 0.3 s, 1.2 s cooldown), reload empty clip, follow the closest teammate (> 3 tiles) via
+  Pathfinder.GetPath(..., CellTypes.FLOOR, canPassOccupied: true - false failed through closed doors), KeepSafe turns
+  away from wall/pit cells, Unstick sidesteps after 0.5 s of no movement (door frames). Off on any key/mouse button
+  or pad input after a 1 s grace (menus/pause extend the grace). F6 (TakeABreakKey) or the toggle in both menus.
+  PlayerState carries OnBreak -> name tag "Name (bot)". Test copies: launch-test-copy -Bot (--gungeon-online-bot)
+  keeps it on; the host's bot explores (nearest unvisited room; the room we're in counts as seen; gives up on a
+  room after 6 s without progress). Verified 2 bot copies: 7 fights, guest died -> ghost followed the host's bot into
+  the next fight, floor matched, no exceptions. Next: rejoin in bot mode, host stand-in for dropped players.
+- 0.125-0.130: Autopilot steering by the feet (PrimaryPixelCollider.UnitCenter), path look-ahead (farthest waypoint
+  with a clear 0.8-wide line), eased direction changes, pit-only cell check + physics feel-ahead
+  (PhysicsEngine.RigidbodyCastWithIgnores 8 px; doors and our helper bodies ignored; walls: turns <= 40 deg then keep
+  pushing so the game slides us, objects: up to 90 deg). Map-based exploring: unseen rooms connected to seen ones,
+  never SECRET, nearest by path length. Loot only when EveryoneIsABot (all remotes OnBreak): nearest chest (locked
+  only with keys) / ownerless gun in a seen, cleared room -> walk there, press interact (0.7 s), give up after 5
+  presses or 15 s. Split money toggle moved next to the other host rules in both menus. BreakButton.cs: online the
+  pause menu's "Exit Coop" (Breach) becomes "TAKE A BREAK" (enables, Autopilot.Start, unpause); offline restored.
+  Black screen fix: a guest's held Quick Restart (death screen) left GameManager.m_loadingLevel set by the button, so
+  DelayedQuickRestart_CR quit at once when the host restarted. Now cleared when holding and before restarting.
+  Verified: both die (test key X), guest Space (Quick Restart) then host Space -> guest joined the new run, floors
+  matched. Not yet seen in play: bot looting, Take a Break pause button.
+- 0.131-0.133: STAND-IN (StandIn.cs). Autopilot split into Brain (per player index; 0 = us, 1 = co-op player 2) +
+  Autopilot facade (Self, list of brains, one PlayerActionSet.Update prefix asks each brain). Host: a guest who leaves
+  (timeout or Bye) mid-run with remembered gear (InventorySync, same seed) gets a stand-in: game switched to
+  COOP_2_PLAYER, their character prefab (CustomCharacterSupport.FindPrefab or BraveResources.Load) spawned as
+  SecondaryPlayer (PlayerIDX 1), next frame ConvertCoreUIToCoopMode / ClearPlayerCache / ghost collision exceptions /
+  ReassignAllControllers, 0.6 s later the remembered gear (InventorySync.Apply). A Brain(1) drives it (follows the
+  host or closest player, fights). Host sends its PlayerState (onBreak) and shots as the slot (Protocol.SendAs);
+  roster keeps the slot with the player's name. Camera ignores it, co-op doors don't wait for it. Its gear is
+  re-remembered every 2 s; every chest opened in the host's game also rolls the stand-in its own contents
+  (Chest.GenerateContents for it, LootEngine.GivePrefabToPlayer). Hello from the same name: position kept, gear
+  remembered, removed (single player again); InventoryRestore now carries hadStandIn + position -> the returning
+  guest warps there and starts in bot mode (Autopilot.Start, "move to take over"). Run end (ClearActiveGameData,
+  LoadCharacterSelect) removes it. Mid-run the host no longer resets the seed when the last guest leaves.
+  One stand-in at a time (the game has one extra player). Verified: guest process killed -> host "keeps playing as a
+  bot", Robot stand-in with co-op HUD; guest relaunched -> "stand-in hands over", rejoined as Robot, "Your bot is
+  still playing - move to take over", floor matched. Chest share not yet seen in play.
+- 0.134: Stand-in fixes. Lost guns on rejoin: the stand-in's first update remembered its STARTING kit as the
+  player's gear before ApplyRemembered ran (0.6 s after spawn), so the real gear was overwritten. Now nothing is
+  remembered until the gear is on (geared flag). Player 2's HUD (hearts, blanks, ammo/gun, item, name labels) is
+  hidden on the host after ConvertCoreUIToCoopMode and re-hidden every 0.5 s. Test key G = give an AK-47.
+- 0.135 (protocol message 48 RestartRequest, guest -> host): a guest's held Quick Restart now asks the host; a host
+  on the death screen presses its own death page Quick Restart (AmmonomiconDeathPageController.DoQuickRestart),
+  otherwise gets a toast "X wants to restart the run - press F7" (AcceptRestartKey, 20 s). The guest's waiting
+  screen says "Asked <host> to restart the run... (Esc: go to the Breach instead)"; Esc clears the hold and loads
+  the Breach. 0.134/0.135 not yet tested in game (the user's own Bare copies were open on the LAN port).
+- 0.137: Money desync fix (4-player test showed 7/7/5/0). The host's purse is authoritative: guests send Wallet deltas
+  to the host only (HostOnly), the host applies them and broadcasts WalletState (49: level, money, keys) on every
+  change and every 2 s; guests set their purse to it. Before: deltas every-to-every, dropped whenever the sender or
+  receiver wasn't "in a shared run" (others loading), and starting amounts never reconciled. Verified: 26 and 42 in
+  all four games.
+- 0.138: Bots followed the closest teammate, so three guest bots followed each other and froze while the host's bot
+  explored. Leader now: a real (non-OnBreak) player first, else the host, living before ghosts. "We're in a boss
+  room" skipped fight pulls in the boss foyer; now only while the boss room is sealed. Verified: 4 bots stayed
+  together, ~9 fights, 0 errors. Noise: "Couldn't join the fight: you're in a locked fight" when already in the same
+  fight (harmless).
+- 0.139: DifficultySync.cs - enemy health x (1 + HealthPerExtraPlayer (0.5) x (players - 1)), stand-in counts. Host
+  computes, sent as a 4th field of Rules (re-sent with every roster change); AIActor.Start postfix at
+  Priority.Last, after Loop The Gungeon's AIActorStartPatch.TryApplyHpMultiplierNonStacking, so they multiply. Toggle
+  in both menus (host), guests see "Enemy health: xN". Not yet tested.

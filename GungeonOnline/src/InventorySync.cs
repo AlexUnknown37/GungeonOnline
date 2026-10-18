@@ -104,6 +104,11 @@ namespace GungeonOnline
         private static float rejoinOfferedAt;
         private static bool rejoinPicked;
 
+        // Joiner: the character we play in the host's current run (to come back as it after visiting the Breach).
+        private static int myRunSeed;
+        private static string myRunCharacter;
+        private static bool breachVisitHandled;
+
         public static bool HasRejoinOffer
         {
             get { return rejoinCharacter != null; }
@@ -167,6 +172,11 @@ namespace GungeonOnline
             bool inRun = me != null && !gm.IsFoyer && !gm.IsLoadingLevel && gm.Dungeon != null && gm.CurrentRunSeed != 0;
             if (session.Link.IsHost || !inRun)
                 return;
+            if (Time.realtimeSinceStartup >= answerPendingUntil && !me.IsGhost)
+            {
+                myRunSeed = gm.CurrentRunSeed;
+                myRunCharacter = me.gameObject.name.Replace("(Clone)", "").Trim();
+            }
 
             if (askWhenReady)
             {
@@ -215,7 +225,24 @@ namespace GungeonOnline
         // Joiner: pick our old character on the character-select screen, then start the run (which joins the host's).
         public static void UpdateRejoin()
         {
-            if (rejoinCharacter == null || session == null || session.Link == null || session.Link.IsHost)
+            if (session == null || session.Link == null || session.Link.IsHost)
+                return;
+            // Back in the Breach while the host still plays the run we were in (we went back, or quit to the Breach):
+            // we come back as the same character, like after a reconnect.
+            GameManager g0 = GameManager.HasInstance ? GameManager.Instance : null;
+            if (g0 != null && !g0.IsFoyer)
+                breachVisitHandled = false;
+            else if (g0 != null && !breachVisitHandled && rejoinCharacter == null && myRunCharacter != null
+                && LevelSync.HostInRun && LevelSync.HostRunSeed == myRunSeed)
+            {
+                breachVisitHandled = true;
+                rejoinCharacter = myRunCharacter;
+                rejoinOfferedAt = Time.realtimeSinceStartup;
+                rejoinPicked = false;
+                Plugin.Log.LogInfo("Back in the Breach during the host's run: we'll rejoin as " + myRunCharacter + ".");
+                Toast.Show("Rejoining the run as your character...", 4f);
+            }
+            if (rejoinCharacter == null)
                 return;
             if (Time.realtimeSinceStartup - rejoinOfferedAt > 120f || !LevelSync.HostInRun)
             {
@@ -249,6 +276,9 @@ namespace GungeonOnline
             // Character chosen: start the run right away (it joins the host's floor).
             if (!gm.IsSelectingCharacter && gm.PrimaryPlayer != null && !Foyer.IsCurrentlyPlayingCharacterSelect)
             {
+                string now = gm.PrimaryPlayer.gameObject.name.Replace("(Clone)", "").Trim();
+                if (!string.Equals(now, rejoinCharacter, System.StringComparison.OrdinalIgnoreCase))
+                    Plugin.Log.LogWarning("Rejoining as " + now + " instead of our old " + rejoinCharacter + " (it was picked before we could).");
                 rejoinCharacter = null;
                 Plugin.Log.LogInfo("Rejoining the host's run.");
                 Toast.Show("Rejoining the run...", 3f);
@@ -257,6 +287,34 @@ namespace GungeonOnline
                 Foyer.Instance.OnDepartedFoyer();
                 gm.DelayedLoadNextLevel(0.5f);
             }
+        }
+
+        // ---- For the stand-in (host) ----
+
+        // The character we remember for this player in this run, or null.
+        public static string RememberedCharacter(string name, int seed)
+        {
+            Snapshot s;
+            if (name == null || !remembered.TryGetValue(name, out s) || s.Seed != seed || string.IsNullOrEmpty(s.Character))
+                return null;
+            return s.Character;
+        }
+
+        // Give a character the gear we remember for this player. Returns how many things were given.
+        public static int ApplyRemembered(string name, PlayerController who)
+        {
+            Snapshot s;
+            if (name == null || who == null || !remembered.TryGetValue(name, out s))
+                return 0;
+            return Apply(who, s);
+        }
+
+        // Remember this character's gear as the player's (their stand-in's latest, handed back when they return).
+        public static void Remember(string name, PlayerController who)
+        {
+            if (name == null || who == null || !GameManager.HasInstance)
+                return;
+            remembered[name] = Take(who);
         }
 
         // Host: remember the joiner's latest list.
@@ -275,11 +333,19 @@ namespace GungeonOnline
                 || GameManager.Instance.CurrentRunSeed != seed)
             {
                 // Nothing to give back: say so, so the joiner stops waiting.
-                session.SendReliable(MsgType.InventoryRestore, delegate (BinaryWriter w) { w.Write(false); });
+                session.SendReliableTo(session.From, MsgType.InventoryRestore, delegate (BinaryWriter w) { w.Write(false); });
                 return;
             }
-            Plugin.Log.LogInfo(session.PeerName + " rejoined our run: sending back their items.");
-            session.SendReliable(MsgType.InventoryRestore, delegate (BinaryWriter w) { w.Write(true); s.Write(w); });
+            Vector2 at;
+            bool hadStandIn = StandIn.TakeHandBack(session.PeerName ?? "", out at);
+            Plugin.Log.LogInfo(session.PeerName + " rejoined our run: sending back their items" + (hadStandIn ? " (their stand-in's)." : "."));
+            session.SendReliableTo(session.From, MsgType.InventoryRestore, delegate (BinaryWriter w)
+            {
+                w.Write(true);
+                s.Write(w);
+                w.Write(hadStandIn);
+                w.Write(at.x); w.Write(at.y);
+            });
         }
 
         // Joiner: get our items back.
@@ -293,9 +359,28 @@ namespace GungeonOnline
                 return;
             }
             Snapshot s = Snapshot.Read(r);
+            bool hadStandIn = r.ReadBoolean();
+            Vector2 standInAt = new Vector2(r.ReadSingle(), r.ReadSingle());
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             if (me == null || GameManager.Instance.CurrentRunSeed != s.Seed)
                 return;
+            int got = Apply(me, s);
+            Plugin.Log.LogInfo("The host remembered our items: got " + got + " back.");
+            if (hadStandIn)
+            {
+                // A bot played our character while we were gone: pick up where it is, still playing, until we move.
+                if (Vector2.Distance(me.transform.position, standInAt) > 1f)
+                    me.WarpToPoint(standInAt, false, false);
+                Autopilot.Start(false);
+                Toast.Show("Welcome back! Your bot is still playing - move to take over.", 6f);
+            }
+            else
+                Toast.Show("Welcome back! Your items and health were restored.", 5f);
+        }
+
+        // Give a character a remembered list of gear (guns with ammo, items, health, armor, blanks).
+        private static int Apply(PlayerController me, Snapshot s)
+        {
             int given = 0;
             for (int i = 0; i < s.GunIds.Count; i++)
             {
@@ -325,8 +410,7 @@ namespace GungeonOnline
             }
             me.healthHaver.Armor = s.Armor;
             me.Blanks = s.Blanks;
-            Plugin.Log.LogInfo("The host remembered our items: got " + given + " back.");
-            Toast.Show("Welcome back! Your items and health were restored.", 5f);
+            return given;
         }
 
         // Items we had that this character doesn't have yet (a passive picked up twice is given twice).

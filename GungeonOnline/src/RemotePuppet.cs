@@ -182,6 +182,21 @@ namespace GungeonOnline
                     + ", " + (r.sharedMaterial != null ? r.sharedMaterial.shader.name : "no material"));
         }
 
+        // A still picture of the character for the party list: the first frame of its standing animation.
+        public tk2dSpriteDefinition Icon()
+        {
+            foreach (string name in new string[] { "idle_front", "idle", "idle_forward" })
+            {
+                foreach (tk2dSpriteAnimation lib in libraries)
+                {
+                    tk2dSpriteAnimationClip clip = lib != null ? lib.GetClipByName(name) : null;
+                    if (clip != null && clip.frames != null && clip.frames.Length > 0 && clip.frames[0].spriteCollection != null)
+                        return clip.frames[0].spriteCollection.spriteDefinitions[clip.frames[0].spriteId];
+                }
+            }
+            return sprite != null && hasShownPartnerFrame ? sprite.GetCurrentSpriteDef() : null;
+        }
+
         private void ShowFrame(string clipName, int frameIndex)
         {
             tk2dSpriteAnimationClip clip = null;

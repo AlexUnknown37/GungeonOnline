@@ -3,14 +3,16 @@ using UnityEngine;
 
 namespace GungeonOnline
 {
-    // Shared pause, like local co-op: when one player pauses, the game stops for both. The other game
-    // freezes time (BraveTime multiplier 0, the same thing the game uses for its own freezes) and shows
+    // Shared pause, like local co-op: when one player pauses, the game stops for everyone. The other games
+    // freeze time (BraveTime multiplier 0, the same thing the game uses for its own freezes) and shows
     // "Partner paused" until they unpause. Nobody can move or be shot while either player has the menu open.
     public static class PauseSync
     {
         private static NetSession session;
         private static bool wePaused;          // our pause menu is open
-        private static bool partnerPaused;     // theirs is
+        private static bool partnerPaused;     // someone else's is
+        private static readonly bool[] pausedBy = new bool[Protocol.MaxPlayers]; // who has theirs open
+        public static string PausedBy = "";
         private static GameObject freezeKey;   // owner of our time multiplier
 
         public static bool PartnerPaused
@@ -30,6 +32,8 @@ namespace GungeonOnline
             bool connected = session != null && session.Status == NetSession.State.Connected;
             if (!connected)
             {
+                for (int i = 0; i < pausedBy.Length; i++)
+                    pausedBy[i] = false;
                 SetPartnerPaused(false);
                 wePaused = false;
                 return;
@@ -41,10 +45,19 @@ namespace GungeonOnline
             bool pausedNow = me != null && GameManager.Instance.IsPaused && !GameManager.Instance.IsLoadingLevel
                 && me.healthHaver != null && !me.healthHaver.IsDead;
 
-            // Never stay frozen by a partner who has since died, left, or is loading.
-            if (partnerPaused && (!session.Remote.HasPlayer || session.Remote.IsDead
-                || (GameManager.HasInstance && GameManager.Instance.IsLoadingLevel)))
-                SetPartnerPaused(false);
+            // Never stay frozen by a player who has since died, left, or is loading.
+            bool loading = GameManager.HasInstance && GameManager.Instance.IsLoadingLevel;
+            string by = "";
+            for (int i = 0; i < pausedBy.Length; i++)
+            {
+                RemotePlayerState p = session.Players[i];
+                if (pausedBy[i] && (loading || !p.Connected || !p.HasPlayer || p.IsDead))
+                    pausedBy[i] = false;
+                if (pausedBy[i] && by.Length == 0)
+                    by = p.Name;
+            }
+            PausedBy = by;
+            SetPartnerPaused(by.Length > 0);
             if (pausedNow != wePaused)
             {
                 wePaused = pausedNow;
@@ -57,7 +70,8 @@ namespace GungeonOnline
         {
             bool paused = r.ReadBoolean();
             Plugin.Log.LogInfo(session.PeerName + (paused ? " paused the game." : " unpaused the game."));
-            SetPartnerPaused(paused);
+            if (session.From >= 0 && session.From < pausedBy.Length)
+                pausedBy[session.From] = paused;
         }
 
         private static void SetPartnerPaused(bool paused)

@@ -18,17 +18,99 @@ namespace GungeonOnline
     {
         private const float SwitchBias = 0.8f;      // switch only when the other player is 20% closer
         private const float Interval = 0.25f;       // re-pick targets 4x a second
+        private const int Me = -1;
+        private const int Bot = -2;                 // the host's stand-in bot (a second player in the host's game)
+        private const float ForceFor = 1f;          // how long a target the leading game sent holds
 
         private static NetSession session;
-        private static GameObject targetGo;
-        private static SpeculativeRigidbody target;
-        private static readonly Dictionary<AIActor, bool> chasingPartner = new Dictionary<AIActor, bool>();
+        private static readonly GameObject[] targetGos = new GameObject[Protocol.MaxPlayers];
+        private static readonly SpeculativeRigidbody[] targets = new SpeculativeRigidbody[Protocol.MaxPlayers];
+        private static readonly bool[] active = new bool[Protocol.MaxPlayers];
+        private static readonly Vector2[] centers = new Vector2[Protocol.MaxPlayers];
+        // Which player each enemy is after: a slot, or Me.
+        private static readonly Dictionary<AIActor, int> chasing = new Dictionary<AIActor, int>();
         private static float nextPickAt;
+        // Enemies whose target the game leading their room sent: the slot, and when.
+        private static readonly Dictionary<AIActor, KeyValuePair<int, float>> forced = new Dictionary<AIActor, KeyValuePair<int, float>>();
 
-        // The partner's invisible body (where they stand), when it's set up. Also used to replay their kicks.
+        // Which player (slot) an enemy is after in our game, or Protocol.NoSlot.
+        public static int SlotOfTarget(AIActor enemy)
+        {
+            SpeculativeRigidbody t = enemy != null ? enemy.TargetRigidbody : null;
+            if (t == null || session == null)
+                return Protocol.NoSlot;
+            PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+            if (me != null && t == me.specRigidbody)
+                return session.LocalSlot;
+            PlayerController bot = StandIn.Active ? StandIn.Player : null;
+            if (bot != null && t == bot.specRigidbody)
+                return StandIn.Slot;
+            for (int i = 0; i < targets.Length; i++)
+            {
+                if (targets[i] == t)
+                    return i;
+            }
+            return Protocol.NoSlot;
+        }
+
+        // The leading game says this enemy is after that player: go after the same one here.
+        public static void Force(AIActor enemy, int slot)
+        {
+            if (enemy == null || slot < 0 || slot >= Protocol.MaxPlayers)
+                return;
+            forced[enemy] = new KeyValuePair<int, float>(slot, Time.realtimeSinceStartup);
+            int want;
+            if (Resolve(slot, out want))
+            {
+                chasing[enemy] = want;
+                ReapplyOverrides();
+            }
+        }
+
+        // A slot as a chase target in our game: us, the stand-in, or another player's invisible body.
+        private static bool Resolve(int slot, out int want)
+        {
+            want = Me;
+            if (session == null)
+                return false;
+            if (slot == session.LocalSlot)
+                return true;
+            if (StandIn.Active && slot == StandIn.Slot && StandIn.Player != null)
+            {
+                want = Bot;
+                return true;
+            }
+            want = slot;
+            return active[slot];
+        }
+
+        // A player's invisible body (where they stand), when it's set up. Also used to replay their kicks.
+        public static SpeculativeRigidbody BodyOf(int slot)
+        {
+            if (slot < 0 || slot >= targets.Length)
+                return null;
+            SpeculativeRigidbody t = targets[slot];
+            return t != null && targetGos[slot] != null && targetGos[slot].activeInHierarchy && t.enabled ? t : null;
+        }
+
+        // The body of the player whose message is being handled.
         public static SpeculativeRigidbody PartnerBody
         {
-            get { return target != null && targetGo != null && targetGo.activeInHierarchy && target.enabled ? target : null; }
+            get { return BodyOf(session != null ? session.From : -1); }
+        }
+
+        private static bool IsOurBody(SpeculativeRigidbody body)
+        {
+            if (body == null)
+                return false;
+            if (StandIn.Active && StandIn.Player != null && body == StandIn.Player.specRigidbody)
+                return true;
+            for (int i = 0; i < targets.Length; i++)
+            {
+                if (targets[i] == body)
+                    return true;
+            }
+            return false;
         }
 
         public static void Init(NetSession netSession, HarmonyLib.Harmony harmony)
@@ -40,43 +122,25 @@ namespace GungeonOnline
         public static void Update()
         {
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
-            RemotePlayerState remote = session != null ? session.Remote : null;
             // The physics body can only be set up once the floor has finished loading: right after a level load
             // the game's physics system doesn't exist yet, the setup crashed, and the body stayed broken for the
             // whole floor (enemies then followed the partner but aimed at us and never fired).
             bool physicsReady = PhysicsEngine.HasInstance && GameManager.HasInstance && !GameManager.Instance.IsLoadingLevel;
-            bool partnerTargetable = physicsReady && session != null && session.Status == NetSession.State.Connected && me != null
-                && remote.HasPlayer && !remote.IsDead && remote.Scene == LevelSync.CurrentLevelKey();
-            if (!partnerTargetable)
+            bool online = physicsReady && session != null && session.Status == NetSession.State.Connected && me != null;
+            string level = online ? LevelSync.CurrentLevelKey() : "";
+            bool anyone = false;
+            for (int i = 0; i < targets.Length; i++)
+            {
+                RemotePlayerState remote = session != null ? session.Players[i] : null;
+                active[i] = online && i != session.LocalSlot && remote.Connected && remote.HasPlayer && !remote.IsDead && remote.Scene == level
+                    && PlaceBody(i, remote);
+                if (!active[i] && targetGos[i] != null && targetGos[i].activeSelf)
+                    targetGos[i].SetActive(false);
+                anyone |= active[i];
+            }
+            if (!anyone)
             {
                 ReleaseAll();
-                if (targetGo != null && targetGo.activeSelf)
-                    targetGo.SetActive(false);
-                return;
-            }
-
-            // Follow the partner's (smoothed) position. Center = smoothed feet + their center-to-feet offset.
-            Vector2 feet = remote.Motion.HasData ? remote.Motion.Sample() : remote.FeetPosition;
-            Vector2 partnerCenter = feet + (remote.Position - remote.FeetPosition);
-            if (!EnsureTarget())
-                return;
-            if (!targetGo.activeSelf)
-                targetGo.SetActive(true);
-            targetGo.transform.position = new Vector3(partnerCenter.x, partnerCenter.y, targetGo.transform.position.z);
-            try
-            {
-                if (!target.enabled)
-                    target.enabled = true; // created disabled; switched on now that physics exists
-                target.Reinitialize();
-            }
-            catch (System.Exception e)
-            {
-                // Throw it away and build a fresh one next frame.
-                Plugin.Log.LogWarning("Partner target body failed to set up (" + e.GetType().Name + "); retrying.");
-                ReleaseAll();
-                Object.Destroy(targetGo);
-                targetGo = null;
-                target = null;
                 return;
             }
 
@@ -95,23 +159,86 @@ namespace GungeonOnline
                 if (enemy == null || enemy.healthHaver == null || enemy.healthHaver.IsDead || !enemy.CanTargetPlayers
                     || enemy.CompanionOwner != null)
                     continue;
+                KeyValuePair<int, float> sent;
+                int sentWant;
+                if (forced.TryGetValue(enemy, out sent) && Time.realtimeSinceStartup - sent.Value < ForceFor
+                    && Resolve(sent.Key, out sentWant))
+                {
+                    chasing[enemy] = sentWant;
+                    continue;
+                }
                 Vector2 pos = enemy.CenterPosition;
-                float dMe = meTargetable ? Vector2.Distance(pos, myCenter) : float.MaxValue;
-                float dPartner = Vector2.Distance(pos, partnerCenter);
+                int current;
+                if (!chasing.TryGetValue(enemy, out current) || current == Bot || (current != Me && !active[current]))
+                    current = Me;
+                float currentDist = current == Me ? (meTargetable ? Vector2.Distance(pos, myCenter) : float.MaxValue)
+                    : Vector2.Distance(pos, centers[current]);
 
-                bool wasPartner;
-                chasingPartner.TryGetValue(enemy, out wasPartner);
-                bool partner = wasPartner ? !(dMe < dPartner * SwitchBias) : dPartner < dMe * SwitchBias;
-                chasingPartner[enemy] = partner;
+                // The closest player, but only switch when they're clearly closer than the one being chased.
+                int best = current;
+                float bestDist = currentDist;
+                if (meTargetable && current != Me)
+                {
+                    float d = Vector2.Distance(pos, myCenter);
+                    if (d < bestDist * SwitchBias)
+                    {
+                        best = Me;
+                        bestDist = d;
+                    }
+                }
+                for (int i = 0; i < targets.Length; i++)
+                {
+                    if (!active[i] || i == current)
+                        continue;
+                    float d = Vector2.Distance(pos, centers[i]);
+                    if (d < bestDist * SwitchBias || (bestDist == float.MaxValue && d < bestDist))
+                    {
+                        best = i;
+                        bestDist = d;
+                    }
+                }
+                chasing[enemy] = best;
             }
             ReapplyOverrides();
         }
 
-        // Some behaviours clear OverrideTarget; set it again every frame for enemies chasing the partner.
+        // Moves (and sets up) the invisible body for one player. False if it couldn't be set up this frame.
+        private static bool PlaceBody(int slot, RemotePlayerState remote)
+        {
+            // Follow the player's (smoothed) position. Center = smoothed feet + their center-to-feet offset.
+            Vector2 feet = remote.Motion.HasData ? remote.Motion.Sample() : remote.FeetPosition;
+            Vector2 center = feet + (remote.Position - remote.FeetPosition);
+            centers[slot] = center;
+            if (!EnsureTarget(slot))
+                return false;
+            GameObject go = targetGos[slot];
+            if (!go.activeSelf)
+                go.SetActive(true);
+            go.transform.position = new Vector3(center.x, center.y, go.transform.position.z);
+            try
+            {
+                if (!targets[slot].enabled)
+                    targets[slot].enabled = true; // created disabled; switched on now that physics exists
+                targets[slot].Reinitialize();
+                return true;
+            }
+            catch (System.Exception e)
+            {
+                // Throw it away and build a fresh one next frame.
+                Plugin.Log.LogWarning("Target body for " + remote.Name + " failed to set up (" + e.GetType().Name + "); retrying.");
+                ReleaseAll();
+                Object.Destroy(go);
+                targetGos[slot] = null;
+                targets[slot] = null;
+                return false;
+            }
+        }
+
+        // Some behaviours clear OverrideTarget; set it again every frame for enemies chasing another player.
         private static void ReapplyOverrides()
         {
             List<AIActor> gone = null;
-            foreach (KeyValuePair<AIActor, bool> pair in chasingPartner)
+            foreach (KeyValuePair<AIActor, int> pair in chasing)
             {
                 AIActor enemy = pair.Key;
                 if (enemy == null || enemy.healthHaver == null || enemy.healthHaver.IsDead)
@@ -120,12 +247,14 @@ namespace GungeonOnline
                     gone.Add(enemy);
                     continue;
                 }
-                if (pair.Value)
+                SpeculativeRigidbody want = pair.Value == Bot ? (StandIn.Player != null ? StandIn.Player.specRigidbody : null)
+                    : pair.Value != Me && active[pair.Value] ? targets[pair.Value] : null;
+                if (want != null)
                 {
-                    if (enemy.OverrideTarget != target)
-                        enemy.OverrideTarget = target;
+                    if (enemy.OverrideTarget != want)
+                        enemy.OverrideTarget = want;
                 }
-                else if (enemy.OverrideTarget == target)
+                else if (IsOurBody(enemy.OverrideTarget))
                 {
                     enemy.OverrideTarget = null;
                 }
@@ -133,18 +262,22 @@ namespace GungeonOnline
             if (gone != null)
             {
                 foreach (AIActor enemy in gone)
-                    chasingPartner.Remove(enemy);
+                {
+                    chasing.Remove(enemy);
+                    forced.Remove(enemy);
+                }
             }
         }
 
         private static void ReleaseAll()
         {
-            foreach (KeyValuePair<AIActor, bool> pair in chasingPartner)
+            foreach (KeyValuePair<AIActor, int> pair in chasing)
             {
-                if (pair.Key != null && target != null && pair.Key.OverrideTarget == target)
+                if (pair.Key != null && IsOurBody(pair.Key.OverrideTarget))
                     pair.Key.OverrideTarget = null;
             }
-            chasingPartner.Clear();
+            chasing.Clear();
+            forced.Clear();
         }
 
         private static readonly List<AIActor> enemies = new List<AIActor>();
@@ -160,6 +293,46 @@ namespace GungeonOnline
         }
         private static List<AIActor> enemiesOut = new List<AIActor>();
 
+        // ---- Rockets without a target ----
+        // The Gatling Gull's rockets take their target when fired. In a game whose own player is a ghost the boss may
+        // have none: the rocket then failed every frame and never came down. Give it the nearest living player (ours
+        // or another player's body), or remove it.
+        [HarmonyLib.HarmonyPrefix]
+        [HarmonyLib.HarmonyPatch(typeof(SkyRocket), "Update")]
+        private static bool BeforeSkyRocket(SkyRocket __instance)
+        {
+            if (__instance.Target != null)
+                return true;
+            Vector2 at = __instance.transform.position;
+            SpeculativeRigidbody best = null;
+            float bestDist = float.MaxValue;
+            PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+            if (me != null && !me.IsGhost && !me.healthHaver.IsDead && me.specRigidbody != null)
+            {
+                best = me.specRigidbody;
+                bestDist = Vector2.Distance(at, me.CenterPosition);
+            }
+            for (int i = 0; i < targets.Length; i++)
+            {
+                SpeculativeRigidbody b = BodyOf(i);
+                if (b == null || !active[i])
+                    continue;
+                float d = Vector2.Distance(at, centers[i]);
+                if (d < bestDist)
+                {
+                    best = b;
+                    bestDist = d;
+                }
+            }
+            if (best != null)
+            {
+                __instance.Target = best;
+                return true;
+            }
+            Object.Destroy(__instance.gameObject);
+            return false;
+        }
+
         // ---- Line of sight ----
         // Enemies only fire when they "see" their target: AIActor casts a ray that must HIT the target's body.
         // Ours has no collisions, so the ray never hit it and enemies aimed but never fired. For our body we
@@ -169,16 +342,17 @@ namespace GungeonOnline
         [HarmonyLib.HarmonyPatch(typeof(AIActor), "HasLineOfSightToRigidbody")]
         private static void AfterHasLineOfSightToRigidbody(AIActor __instance, SpeculativeRigidbody __0, ref bool __result)
         {
-            if (target != null && __0 == target && __instance.specRigidbody != null)
-                __result = !WallBetween(__instance.specRigidbody.UnitCenter, target.UnitCenter);
+            if (__instance.specRigidbody != null && IsOurBody(__0))
+                __result = !WallBetween(__instance.specRigidbody.UnitCenter, __0.UnitCenter);
         }
 
         [HarmonyLib.HarmonyPostfix]
         [HarmonyLib.HarmonyPatch(typeof(AIActor), "HasLineOfSightToTargetFromPosition")]
         private static void AfterHasLineOfSightFromPosition(AIActor __instance, Vector2 __0, ref bool __result)
         {
-            if (target != null && __instance.TargetRigidbody == target)
-                __result = !WallBetween(__0, target.UnitCenter);
+            SpeculativeRigidbody t = __instance.TargetRigidbody;
+            if (IsOurBody(t))
+                __result = !WallBetween(__0, t.UnitCenter);
         }
 
         // Walk the line between two points in quarter-tile steps and look for wall cells.
@@ -200,12 +374,14 @@ namespace GungeonOnline
         }
 
         // The invisible body enemies can aim at: one player-sized hitbox, no collisions.
-        private static bool EnsureTarget()
+        private static bool EnsureTarget(int slot)
         {
-            if (target != null && targetGo != null)
+            if (targets[slot] != null && targetGos[slot] != null)
                 return true;
-            targetGo = new GameObject("GungeonOnline Partner Target");
-            target = targetGo.AddComponent<SpeculativeRigidbody>();
+            GameObject targetGo = new GameObject("GungeonOnline Partner Target " + (slot + 1));
+            SpeculativeRigidbody target = targetGo.AddComponent<SpeculativeRigidbody>();
+            targetGos[slot] = targetGo;
+            targets[slot] = target;
             target.CollideWithOthers = false;
             target.CollideWithTileMap = false;
             target.CanBePushed = false;
@@ -220,7 +396,7 @@ namespace GungeonOnline
             target.PixelColliders.Add(box);
             // Disabled until Update has checked the physics system is ready (it then enables + initializes it).
             target.enabled = false;
-            Plugin.Log.LogInfo("Created the partner's target body for enemies.");
+            Plugin.Log.LogInfo("Created player " + (slot + 1) + "'s target body for enemies.");
             return true;
         }
     }

@@ -11,7 +11,8 @@ namespace GungeonOnline
     // - If you die while your partner is still alive, you become a ghost instead of getting a game over.
     // - While one player is a ghost, the next normal chest the living player opens brings them back
     //   (no loot from that chest), right at the chest.
-    // - If the second player dies too, both games show the death screen.
+    // - If the last living player dies too, every game shows the death screen.
+    // With more than two players: a ghost comes back when any living player opens a chest (every ghost at once).
     //
     // The game only does this when it is in local co-op mode with two players in one game. Online each
     // game has one player, so we call the same functions ourselves: HandleCoopDeath (become a ghost) and
@@ -33,19 +34,49 @@ namespace GungeonOnline
             get { return session != null && session.Status == NetSession.State.Connected; }
         }
 
-        // Is the partner alive, in a run, on our floor? Only then can they come and get us.
+        // Is another player alive, in a run, on our floor? Only then can they come and get us.
         private static bool PartnerAliveHere
         {
             get
             {
-                RemotePlayerState r = session.Remote;
-                return r.HasPlayer && !r.IsDead && r.Scene == LevelSync.CurrentLevelKey();
+                string level = LevelSync.CurrentLevelKey();
+                foreach (RemotePlayerState r in session.Remotes)
+                {
+                    if (r.HasPlayer && !r.IsDead && r.Scene == level)
+                        return true;
+                }
+                return false;
             }
         }
 
+        // Is any other player a ghost?
         public static bool PartnerIsGhost
         {
-            get { return Connected && session.Remote.HasPlayer && session.Remote.IsDead; }
+            get
+            {
+                if (!Connected)
+                    return false;
+                foreach (RemotePlayerState r in session.Remotes)
+                {
+                    if (r.HasPlayer && r.IsDead)
+                        return true;
+                }
+                return false;
+            }
+        }
+
+        // Is every other player down (a ghost, dead) or without a character?
+        private static bool EveryoneElseDown
+        {
+            get
+            {
+                foreach (RemotePlayerState r in session.Remotes)
+                {
+                    if (r.HasPlayer && !r.IsDead)
+                        return false;
+                }
+                return true;
+            }
         }
 
         // ---- Dying ----
@@ -68,10 +99,10 @@ namespace GungeonOnline
                 return false;
             }
 
-            // The partner is already a ghost (or gone): this is a normal game over, for both of us.
-            if (session.Remote.HasPlayer && session.Remote.IsDead)
+            // Everyone else is already a ghost (or gone): this is a normal game over, for all of us.
+            if (PartnerIsGhost && EveryoneElseDown)
             {
-                Plugin.Log.LogInfo("We died while our partner is a ghost: game over for both.");
+                Plugin.Log.LogInfo("We died while everyone else is a ghost: game over for all.");
                 session.SendReliable(MsgType.TeamWiped, null);
             }
             return true;
@@ -98,7 +129,7 @@ namespace GungeonOnline
                 allDeadSince = -1f;
                 return;
             }
-            bool partnerDown = Connected ? (session.Remote.HasPlayer && session.Remote.IsDead) : true;
+            bool partnerDown = Connected ? EveryoneElseDown : true;
             if (!partnerDown)
             {
                 allDeadSince = -1f;
@@ -112,14 +143,14 @@ namespace GungeonOnline
             }
             if (now - allDeadSince >= (Connected ? AllDeadGrace : PartnerGoneGrace))
             {
-                Plugin.Log.LogInfo(Connected ? "Both players are down: game over." : "We're a ghost and our partner is gone: game over.");
+                Plugin.Log.LogInfo(Connected ? "Every player is down: game over." : "We're a ghost and everyone else is gone: game over.");
                 ForceGameOver();
             }
         }
 
         public static void OnTeamWiped()
         {
-            Plugin.Log.LogInfo("Partner died too: game over.");
+            Plugin.Log.LogInfo(session.PeerName + " died last: game over.");
             ForceGameOver();
         }
 
@@ -194,26 +225,81 @@ namespace GungeonOnline
             SendRevive(me.CenterPosition, true);
         }
 
-        private static void SendRevive(Vector2 at, bool fromBoss)
+        // Every ghost comes back, or only the one in slot onlySlot.
+        private static void SendRevive(Vector2 at, bool fromBoss, int onlySlot = -1)
         {
+            byte target = onlySlot < 0 ? Protocol.NoSlot : (byte)onlySlot;
             session.SendReliable(MsgType.Revive, delegate (BinaryWriter w)
             {
                 w.Write(at.x);
                 w.Write(at.y);
                 w.Write(fromBoss);
+                w.Write(target);
             });
+        }
+
+        // ---- The Cultist's Friendship Cookie (and any other "revives the partner" item) ----
+        // In local co-op it can only be used while the partner is dead, and brings them back. Online the game counts
+        // as single player, so it never revived anyone: here it can be used while another player on our floor is a
+        // ghost, and brings back the closest one.
+
+        private static RemotePlayerState ClosestGhost(PlayerController user)
+        {
+            if (!Connected || user == null)
+                return null;
+            string level = LevelSync.CurrentLevelKey();
+            RemotePlayerState best = null;
+            float bestDist = float.MaxValue;
+            foreach (RemotePlayerState r in session.Remotes)
+            {
+                if (!r.HasPlayer || !r.IsDead || r.Scene != level)
+                    continue;
+                float d = Vector2.Distance(user.CenterPosition, r.Position);
+                if (d < bestDist)
+                {
+                    best = r;
+                    bestDist = d;
+                }
+            }
+            return best;
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(HealPlayerItem), "CanBeUsed")]
+        private static void AfterCookieCanBeUsed(HealPlayerItem __instance, PlayerController __0, ref bool __result)
+        {
+            if (__instance.DoesRevive && Connected && __result && ClosestGhost(__0) == null)
+                __result = false;
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(HealPlayerItem), "DoEffect")]
+        private static void BeforeCookieEffect(HealPlayerItem __instance, PlayerController __0)
+        {
+            PlayerController user = __0;
+            if (!__instance.DoesRevive || !Connected)
+                return;
+            RemotePlayerState ghost = ClosestGhost(__0);
+            if (ghost == null)
+                return;
+            Plugin.Log.LogInfo("Used " + __instance.name + ": bringing back " + ghost.Name + ".");
+            Toast.Show("Bringing back " + ghost.Name + "!", 3f);
+            SendRevive(__0.CenterPosition, true, ghost.Slot);
         }
 
         public static void OnRevive(BinaryReader r)
         {
             Vector2 at = new Vector2(r.ReadSingle(), r.ReadSingle());
             bool fromBoss = r.ReadBoolean();
+            int target = r.ReadByte();
             if (!GameManager.HasInstance)
                 return;
+            if (target != Protocol.NoSlot && target != session.LocalSlot)
+                return; // someone else is being brought back
             PlayerController p = GameManager.Instance.PrimaryPlayer;
             if (p == null || !p.IsGhost)
                 return;
-            Plugin.Log.LogInfo(fromBoss ? "Partner beat the boss: coming back to life." : "Partner opened a chest: coming back to life.");
+            Plugin.Log.LogInfo(fromBoss ? session.PeerName + " beat the boss or used a revive: coming back to life." : session.PeerName + " opened a chest: coming back to life.");
             if (!fromBoss)
                 OpenChestNear(at);
             p.ResurrectFromChest(at);
@@ -239,6 +325,17 @@ namespace GungeonOnline
             p.ClearInputOverride("revivepause");
             p.IsCurrentlyCoopReviving = false;
             Plugin.Log.LogInfo("Revive finished: control restored.");
+        }
+
+        // "The best living player" is nobody in a game whose only player is a ghost (local co-op always has someone
+        // alive while the run goes on). The boss's loot drop asks for it and crashed there: that game got no boss
+        // chest. Answer with our own player instead.
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(GameManager), "BestActivePlayer", MethodType.Getter)]
+        private static void AfterBestActivePlayer(GameManager __instance, ref PlayerController __result)
+        {
+            if (__result == null && Connected)
+                __result = __instance.PrimaryPlayer;
         }
 
         // A ghost that drifts too far is "reunited" with the other player; online there is none in our game

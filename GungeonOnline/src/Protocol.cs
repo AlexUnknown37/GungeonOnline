@@ -3,7 +3,8 @@ using System.IO;
 
 namespace GungeonOnline
 {
-    // The first byte of every packet says what kind of message it is.
+    // The first byte of every packet says what kind of message it is; the second which player sent it
+    // (their slot: 0 = host, 1-3 = guests). Guests only talk to the host, which passes their messages on.
     public enum MsgType : byte
     {
         Hello = 1,       // "I'm here": protocol version + Steam name. Sent once by each side.
@@ -51,15 +52,26 @@ namespace GungeonOnline
         Beams = 44,      // our gun's beams: kind, start point, direction
         AtExit = 45,     // joiner -> host: we took the exit and are waiting for you to take yours
         ModSettings = 46, // host -> joiner: other mods' settings (Gungeon Go Vroom) to match
+        Roster = 47,      // host -> guests: who is in the game (slot + name of every player)
+        RestartRequest = 48, // guest -> host: we pressed Quick Restart; please restart the run
+        WalletState = 49, // host -> guests: the shared purse as it is (money, keys); guests set theirs to it
+        LoopStart = 51,   // host -> guests: our loop's time tube just started (the loop number it leads to)
+        AttackStart = 50, // an enemy in the room we lead started an attack: which one, at whom, from where, dice seed
         Progress = 28,   // host -> joiner: one part of the host's save progress (floors are built from it)
     }
 
     public static class Protocol
     {
         // Bump this whenever the packet format changes, so old and new versions refuse to talk.
-        public const int Version = 32;
+        public const int Version = 38;
         public const int Channel = 0;
-        public const int MaxPlayers = 2;
+        public const int MaxPlayers = 4;
+        public const byte NoSlot = 255;   // a guest before the host has given it a slot
+
+        // Our own slot, written into every message we build.
+        public static byte LocalSlot = 0;
+        // Host: while >= 0, messages are built as coming from this slot (a stand-in playing for someone).
+        public static int SendAs = -1;
 
         // One reusable buffer (messages are built one at a time on the main thread): a new one per message made
         // a lot of garbage.
@@ -70,6 +82,7 @@ namespace GungeonOnline
         {
             buildStream.SetLength(0);
             buildWriter.Write((byte)type);
+            buildWriter.Write(SendAs >= 0 ? (byte)SendAs : LocalSlot);
             if (writeBody != null)
                 writeBody(buildWriter);
             buildWriter.Flush();

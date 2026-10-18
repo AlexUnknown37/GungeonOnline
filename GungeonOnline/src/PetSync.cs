@@ -20,7 +20,7 @@ namespace GungeonOnline
         private const float StopRange = 3f;
 
         private static NetSession session;
-        private static PetPuppet pet;
+        private static int petOwner = -1;   // the slot whose dog we're petting
         private static bool petting;
         private static float pettingSince;
         private static readonly FieldInfo queuedAnimationField = AccessTools.Field(typeof(PlayerController), "m_handlingQueuedAnimation");
@@ -29,10 +29,9 @@ namespace GungeonOnline
         private static readonly MethodInfo toggleHands = AccessTools.Method(typeof(PlayerController), "ToggleHandRenderers");
         private static readonly FieldInfo activeActionsField = AccessTools.Field(typeof(PlayerController), "m_activeActions");
 
-        public static void Init(NetSession netSession, PetPuppet petPuppet)
+        public static void Init(NetSession netSession)
         {
             session = netSession;
-            pet = petPuppet;
         }
 
         public static void Update()
@@ -48,9 +47,10 @@ namespace GungeonOnline
 
             if (petting)
             {
+                PetPuppet pet = petOwner >= 0 ? Plugin.Pets[petOwner] : null;
                 bool moving = Time.realtimeSinceStartup - pettingSince > 0.25f && me.specRigidbody != null
                     && me.specRigidbody.Velocity.sqrMagnitude > 0.01f;
-                bool stillPetting = pet.IsShown && Vector2.Distance(me.CenterPosition, pet.Center) <= StopRange
+                bool stillPetting = pet != null && pet.IsShown && Vector2.Distance(me.CenterPosition, pet.Center) <= StopRange
                     && !me.IsDodgeRolling && !moving && !me.IsInCombat;
                 if (!stillPetting)
                 {
@@ -63,10 +63,26 @@ namespace GungeonOnline
                 return;
             }
 
-            if (!pet.IsShown || me.IsGhost || me.IsInCombat || me.IsDodgeRolling || me.IsPetting)
+            if (me.IsGhost || me.IsInCombat || me.IsDodgeRolling || me.IsPetting)
                 return;
-            if (Vector2.Distance(me.CenterPosition, pet.Center) > StartRange || !InteractPressed(me))
+            // The closest dog in reach.
+            int closest = -1;
+            float closestDist = StartRange;
+            for (int i = 0; i < Plugin.Pets.Length; i++)
+            {
+                PetPuppet candidate = Plugin.Pets[i];
+                if (i == session.LocalSlot || !candidate.IsShown)
+                    continue;
+                float d = Vector2.Distance(me.CenterPosition, candidate.Center);
+                if (d <= closestDist)
+                {
+                    closest = i;
+                    closestDist = d;
+                }
+            }
+            if (closest < 0 || !InteractPressed(me))
                 return;
+            petOwner = closest;
             StartPetting(me);
         }
 
@@ -86,9 +102,10 @@ namespace GungeonOnline
             queuedAnimationField.SetValue(me, true);
             me.spriteAnimator.Play("pet");
             SetGunAndHands(me, false);
-            bool petterOnLeft = me.CenterPosition.x < pet.Center.x;
-            Plugin.Log.LogInfo("Petting the partner's dog.");
-            session.SendReliable(MsgType.PetStart, delegate (BinaryWriter w) { w.Write(petterOnLeft); });
+            bool petterOnLeft = me.CenterPosition.x < Plugin.Pets[petOwner].Center.x;
+            byte owner = (byte)petOwner;
+            Plugin.Log.LogInfo("Petting " + session.Players[petOwner].Name + "'s dog.");
+            session.SendReliable(MsgType.PetStart, delegate (BinaryWriter w) { w.Write(owner); w.Write(petterOnLeft); });
         }
 
         private static void StopPetting(PlayerController me)
@@ -96,7 +113,11 @@ namespace GungeonOnline
             petting = false;
             queuedAnimationField.SetValue(me, false);
             SetGunAndHands(me, true);
-            session.SendReliable(MsgType.PetStop, null);
+            if (petOwner < 0)
+                return;
+            byte owner = (byte)petOwner;
+            petOwner = -1;
+            session.SendReliable(MsgType.PetStop, delegate (BinaryWriter w) { w.Write(owner); });
         }
 
         private static void SetGunAndHands(PlayerController me, bool visible)
@@ -125,7 +146,10 @@ namespace GungeonOnline
 
         public static void OnPetStart(BinaryReader r)
         {
+            int owner = r.ReadByte();
             bool petterOnLeft = r.ReadBoolean();
+            if (owner != session.LocalSlot)
+                return; // someone else's dog
             AIActor dog = OurPettableDog();
             if (dog == null)
                 return;
@@ -135,8 +159,10 @@ namespace GungeonOnline
             dog.aiAnimator.PlayUntilCancelled("pet", false, null, -1f, false);
         }
 
-        public static void OnPetStop()
+        public static void OnPetStop(BinaryReader r)
         {
+            if (r.ReadByte() != session.LocalSlot)
+                return;
             AIActor dog = OurPettableDog();
             if (dog == null)
                 return;

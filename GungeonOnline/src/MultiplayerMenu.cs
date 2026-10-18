@@ -152,6 +152,8 @@ namespace GungeonOnline
         {
             int index = navIndex++;
             bool selected = usingController && index == focus;
+            // The label style draws no checkbox, so the state is written in front of the text.
+            text = (value ? "[ON]   " : "[OFF]  ") + text.Trim();
             bool result = GUILayout.Toggle(value, selected ? "> " + text : text, selected ? Highlight(style, true) : style, options);
             Track(index);
             if (pendingActivate == index && Event.current.type == EventType.Layout)
@@ -250,7 +252,7 @@ namespace GungeonOnline
             GUILayout.Label("MULTIPLAYER", title);
             if (usingController)
                 GUILayout.Label("Controller: up/down to choose, A to press, B to go back.", small);
-            GUILayout.Label("Version " + Plugin.ModVersion + "  -  early alpha side project, expect bugs! Both players need the same version.", small);
+            GUILayout.Label("Version " + Plugin.ModVersion + "  -  early alpha side project, expect bugs! Every player needs the same version.", small);
             GUILayout.Space(10);
 
             GUILayout.Label("Your name", label);
@@ -263,9 +265,40 @@ namespace GungeonOnline
             }
             GUILayout.EndHorizontal();
             // Shown whether or not you're connected, so it can be set before joining too.
-            bool names = Tog(Plugin.ShowPartnerName.Value, "  Show partner's name (only on your screen)", label);
+            bool takeBreak = Tog(Autopilot.Active, "  Take a Break: the bot plays until you move (" + Plugin.TakeABreakKey.Value + ")", label);
+            if (takeBreak != Autopilot.Active)
+                Autopilot.Toggle();
+            bool names = Tog(Plugin.ShowPartnerName.Value, "  Show other players' names (only on your screen)", label);
             if (names != Plugin.ShowPartnerName.Value)
                 Plugin.ShowPartnerName.Value = names;
+            // A host rule: guests see the host's choice.
+            if (session.Link != null && !session.Link.IsHost)
+            {
+                GUILayout.Label("Teleport to fights: " + (session.FightPull ? "on" : "off") + " (the host decides)", small);
+                GUILayout.Label("Split money: " + (session.HalfMoney ? "on" : "off") + " (the host decides)", small);
+                GUILayout.Label("Enemy health: x" + DifficultySync.Factor.ToString("0.##") + " (the host decides)", small);
+            }
+            else
+            {
+                bool fights = Tog(Plugin.TeleportToFights.Value, "  Teleport everyone into fights (when you host)", label);
+                if (fights != Plugin.TeleportToFights.Value)
+                {
+                    Plugin.TeleportToFights.Value = fights;
+                    session.SendRules();
+                }
+                bool scale = Tog(Plugin.ScaleEnemyHealth.Value, "  Tougher enemies with more players: +" + Mathf.RoundToInt(Plugin.HealthPerExtraPlayer.Value * 100f) + "% health each (when you host)", label);
+                if (scale != Plugin.ScaleEnemyHealth.Value)
+                {
+                    Plugin.ScaleEnemyHealth.Value = scale;
+                    session.SendRules();
+                }
+                bool split = Tog(Plugin.HalfMoney.Value, "  Split money: pickups count 1/players (when you host)", label);
+                if (split != Plugin.HalfMoney.Value)
+                {
+                    Plugin.HalfMoney.Value = split;
+                    session.SendRules();
+                }
+            }
             GUILayout.Space(12);
 
             if (session.Link == null)
@@ -344,7 +377,8 @@ namespace GungeonOnline
             Transport link = session.Link;
             string state;
             if (session.Status == NetSession.State.Connected)
-                state = "Playing with " + session.PeerName + (session.PingMs >= 0f ? "  (" + Mathf.RoundToInt(session.PingMs) + " ms)" : "");
+                state = "Playing with " + session.RemoteNames() + (session.PingMs >= 0f ? "  (" + Mathf.RoundToInt(session.PingMs) + " ms)" : "")
+                    + (link.IsHost && session.Remotes.Count < Protocol.MaxPlayers - 1 ? "  -  room for " + (Protocol.MaxPlayers - 1 - session.Remotes.Count) + " more" : "");
             else if (session.Status == NetSession.State.WaitingForPartner)
                 state = "Waiting for a friend to join...";
             else
@@ -377,17 +411,10 @@ namespace GungeonOnline
                     Plugin.Pvp.Value = pvp;
                     session.SendRules();
                 }
-                bool half = Tog(Plugin.HalfMoney.Value, "  Half money: shared purse, pickups count half", label);
-                if (half != Plugin.HalfMoney.Value)
-                {
-                    Plugin.HalfMoney.Value = half;
-                    session.SendRules();
-                }
             }
             else
             {
                 GUILayout.Label("PvP: " + (session.PvpEnabled ? "on" : "off") + " (the host decides)", small);
-                GUILayout.Label("Half money: " + (session.HalfMoney ? "on" : "off") + " (the host decides)", small);
             }
 
             GUILayout.Space(8);

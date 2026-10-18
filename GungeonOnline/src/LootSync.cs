@@ -42,9 +42,19 @@ namespace GungeonOnline
             get { return GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null; }
         }
 
+        // Is another player on our floor?
         private static bool PartnerHere
         {
-            get { return session.Remote.HasPlayer && session.Remote.Scene == LevelSync.CurrentLevelKey(); }
+            get
+            {
+                string level = LevelSync.CurrentLevelKey();
+                foreach (RemotePlayerState r in session.Remotes)
+                {
+                    if (r.HasPlayer && r.Scene == level)
+                        return true;
+                }
+                return false;
+            }
         }
 
         private static RoomHandler RoomAt(Vector2 pos)
@@ -74,7 +84,10 @@ namespace GungeonOnline
         [HarmonyPatch(typeof(Chest), "Open")]
         private static void AfterChestOpen(Chest __instance, PlayerController player)
         {
-            if (applyingRemote || !Connected || player == null || player != Me || __instance == DeathSync.ReviveChest)
+            if (applyingRemote || player == null || player != Me || __instance == DeathSync.ReviveChest)
+                return;
+            StandInShare(__instance); // also when nobody else is connected any more
+            if (!Connected)
                 return;
             Vector2 pos = __instance.transform.position;
             string level = LevelSync.CurrentLevelKey();
@@ -112,7 +125,10 @@ namespace GungeonOnline
             // (RewardManager's floor manifest), so just clearing them got the partner's item again. Roll new
             // contents with our own random numbers instead.
             if (!mimic)
+            {
                 RerollChest(chest, me);
+                StandInShare(chest);
+            }
             Plugin.Log.LogInfo("Partner opened a chest: opening ours too (own contents).");
             applyingRemote = true;
             try
@@ -129,6 +145,38 @@ namespace GungeonOnline
             // Not in that room: go there, so our loot isn't left behind on the floor.
             if (!me.IsGhost && !me.healthHaver.IsDead && me.CurrentRoom != RoomAt(pos))
                 PlayerWarp.TeleportToPartner();
+        }
+
+        // Host with a stand-in playing for someone who left: every chest opened also gives the stand-in its own roll,
+        // straight into its inventory - it's their loot, handed back when they return.
+        private static readonly HashSet<Chest> standInShared = new HashSet<Chest>();
+
+        private static void StandInShare(Chest chest)
+        {
+            PlayerController bot = StandIn.Player;
+            if (bot == null || chest == null || bot.IsGhost || bot.healthHaver.IsDead || !standInShared.Add(chest))
+                return;
+            if (chestMimicField != null && (bool)chestMimicField.GetValue(chest))
+                return;
+            try
+            {
+                List<PickupObject> rolled = generateContents != null
+                    ? generateContents.Invoke(chest, new object[] { bot, 0, new System.Random(ownRandom.Next()) }) as List<PickupObject>
+                    : null;
+                if (rolled == null)
+                    return;
+                foreach (PickupObject item in rolled)
+                {
+                    if (item == null)
+                        continue;
+                    LootEngine.GivePrefabToPlayer(item.gameObject, bot);
+                    Plugin.Log.LogInfo("Stand-in for " + StandIn.Name + " gets its own " + item.name + " from the chest.");
+                }
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Couldn't give the stand-in its chest share: " + e.Message);
+            }
         }
 
         private static readonly MethodInfo generateContents = AccessTools.Method(typeof(Chest), "GenerateContents");
@@ -156,6 +204,7 @@ namespace GungeonOnline
 
         // ---- Master Round ----
 
+        // Rooms other players got hit in, as room index * MaxPlayers + their slot.
         private static readonly HashSet<int> partnerHitRooms = new HashSet<int>();
         private static readonly HashSet<int> sentHitRooms = new HashSet<int>();
 
@@ -183,11 +232,11 @@ namespace GungeonOnline
             if (level != LevelSync.CurrentLevelKey())
                 return;
             CheckFloor();
-            partnerHitRooms.Add(roomIndex);
+            partnerHitRooms.Add(roomIndex * Protocol.MaxPlayers + Mathf.Clamp(session.From, 0, Protocol.MaxPlayers - 1));
         }
 
         // The boss drops the Master Round when its room's "player got hit" flag is off. If we were hit but the
-        // partner fought the boss alive without being hit, switch the flag off for the drop only.
+        // another player fought the boss alive without being hit, switch the flag off for the drop only.
         [HarmonyPrefix]
         [HarmonyPatch(typeof(AIActor), "HandleLootPinata")]
         private static void BeforeLootPinata(AIActor __instance, out bool __state)
@@ -196,13 +245,26 @@ namespace GungeonOnline
             if (!Connected || __instance.healthHaver == null || !__instance.healthHaver.IsBoss)
                 return;
             RoomHandler room = __instance.ParentRoom;
-            if (room == null || !room.PlayerHasTakenDamageInThisRoom || !PartnerHere || session.Remote.IsDead)
+            if (room == null || !room.PlayerHasTakenDamageInThisRoom || !PartnerHere)
                 return;
             CheckFloor();
             int roomIndex = GameManager.Instance.Dungeon.data.rooms.IndexOf(room);
-            if (roomIndex < 0 || partnerHitRooms.Contains(roomIndex) || RoomAt(session.Remote.FeetPosition) != room)
+            if (roomIndex < 0)
                 return;
-            Plugin.Log.LogInfo("Partner beat the boss without getting hit: we get the Master Round too.");
+            RemotePlayerState unhit = null;
+            string level = LevelSync.CurrentLevelKey();
+            foreach (RemotePlayerState p in session.Remotes)
+            {
+                if (p.HasPlayer && !p.IsDead && p.Scene == level && RoomAt(p.FeetPosition) == room
+                    && !partnerHitRooms.Contains(roomIndex * Protocol.MaxPlayers + p.Slot))
+                {
+                    unhit = p;
+                    break;
+                }
+            }
+            if (unhit == null)
+                return;
+            Plugin.Log.LogInfo(unhit.Name + " beat the boss without getting hit: we get the Master Round too.");
             room.PlayerHasTakenDamageInThisRoom = false;
             __state = true;
         }
@@ -216,15 +278,21 @@ namespace GungeonOnline
         }
 
         // ---- Dropped guns ----
-        // Each dropped gun gets a number (host even, joiner odd) so both games know which one was taken.
+        // Each dropped gun gets a number (ending in the dropper's slot) so every game knows which one was taken.
 
         private static readonly Dictionary<int, Gun> guns = new Dictionary<int, Gun>();
+
+        // A gun some player dropped (ours, or the copy of another player's drop).
+        public static bool IsPlayerDrop(Gun g)
+        {
+            return g != null && guns.ContainsValue(g);
+        }
         private static int nextGunId;
 
         private static int NewGunId()
         {
             nextGunId++;
-            return nextGunId * 2 + (session.Link.IsHost ? 0 : 1);
+            return nextGunId * Protocol.MaxPlayers + Mathf.Clamp(session.LocalSlot, 0, Protocol.MaxPlayers - 1);
         }
 
         [HarmonyPrefix]
@@ -381,12 +449,38 @@ namespace GungeonOnline
         private static PlayerController walletOwner;
         private static int lastMoney, lastKeys;
 
-        // Both of us in a run (not the Breach), so the purse is shared.
+        // We and at least one other player in a run (not the Breach), so the purse is shared.
         private static bool InSharedRun()
         {
             PlayerController me = Me;
             return Connected && me != null && !GameManager.Instance.IsFoyer && !GameManager.Instance.IsLoadingLevel
-                && session.Remote.HasPlayer && !session.Remote.Scene.StartsWith("tt_foyer");
+                && PlayersInRun() > 1;
+        }
+
+        // How many players (us included) are in the run right now.
+        private static int PlayersInRun()
+        {
+            int n = 1;
+            foreach (RemotePlayerState p in session.Remotes)
+            {
+                if (p.HasPlayer && !p.Scene.StartsWith("tt_foyer"))
+                    n++;
+            }
+            return n;
+        }
+
+        // ---- The shared purse ----
+        // The host's money and keys are the real purse. Guests send the host every change in theirs (pickups, buying,
+        // keys used); the host adds them to its own and sends everyone the exact amount whenever it changes (and every
+        // 2 s), which guests then show. (Before, every game sent its changes to every other one: one change skipped
+        // or arriving at a bad moment, and the purses stayed different for the rest of the run.)
+        private static float nextWalletStateAt;
+        private static int sentMoney = -1, sentKeys = -1;
+
+        private static bool InRunNow()
+        {
+            PlayerController me = Me;
+            return me != null && GameManager.HasInstance && !GameManager.Instance.IsFoyer && !GameManager.Instance.IsLoadingLevel;
         }
 
         public static void Update()
@@ -400,33 +494,80 @@ namespace GungeonOnline
             PlayerConsumables c = me.carriedConsumables;
             if (me != walletOwner)
             {
-                // New character (new run): start counting from here, nothing to share yet.
+                // New character (new run): start counting from here.
                 walletOwner = me;
                 lastMoney = c.Currency;
                 lastKeys = c.KeyBullets;
+                sentMoney = sentKeys = -1;
                 return;
             }
             int dm = c.Currency - lastMoney, dk = c.KeyBullets - lastKeys;
             lastMoney = c.Currency;
             lastKeys = c.KeyBullets;
-            if ((dm == 0 && dk == 0) || !InSharedRun())
+            if (!InRunNow())
                 return;
+            if (session.Link.IsHost)
+            {
+                // The host's purse is the real one: tell everyone when it changes, and now and then anyway.
+                float now = Time.realtimeSinceStartup;
+                if (c.Currency != sentMoney || c.KeyBullets != sentKeys || now >= nextWalletStateAt)
+                    SendWalletState(c);
+                return;
+            }
+            if (dm == 0 && dk == 0)
+                return;
+            int money = dm, keys = dk;
             session.SendReliable(MsgType.Wallet, delegate (BinaryWriter w)
             {
-                w.Write(dm); w.Write(dk);
+                w.Write(money); w.Write(keys);
             });
         }
 
+        private static void SendWalletState(PlayerConsumables c)
+        {
+            nextWalletStateAt = Time.realtimeSinceStartup + 2f;
+            sentMoney = c.Currency;
+            sentKeys = c.KeyBullets;
+            int money = c.Currency, keys = c.KeyBullets;
+            string level = LevelSync.CurrentLevelKey();
+            session.SendReliable(MsgType.WalletState, delegate (BinaryWriter w)
+            {
+                w.Write(level); w.Write(money); w.Write(keys);
+            });
+        }
+
+        // Host: a guest's purse changed (picked up money, bought something, used a key): the shared purse changes too.
         public static void OnWallet(BinaryReader r)
         {
             int dm = r.ReadInt32(), dk = r.ReadInt32();
             PlayerController me = Me;
-            if (me == null || !InSharedRun())
+            if (me == null || !session.Link.IsHost || !InRunNow())
                 return;
             PlayerConsumables c = me.carriedConsumables;
             c.Currency = Mathf.Max(0, c.Currency + dm);
             c.KeyBullets = Mathf.Max(0, c.KeyBullets + dk);
-            // Not a change of ours: don't send it back.
+            // Not a change of ours to count again.
+            walletOwner = me;
+            lastMoney = c.Currency;
+            lastKeys = c.KeyBullets;
+            SendWalletState(c);
+        }
+
+        // Guest: the shared purse as the host has it.
+        public static void OnWalletState(BinaryReader r)
+        {
+            string level = r.ReadString();
+            int money = r.ReadInt32(), keys = r.ReadInt32();
+            PlayerController me = Me;
+            if (me == null || !InRunNow() || level != LevelSync.CurrentLevelKey())
+                return;
+            PlayerConsumables c = me.carriedConsumables;
+            if (c.Currency != money || c.KeyBullets != keys)
+            {
+                c.Currency = money;
+                c.KeyBullets = keys;
+            }
+            // Not a change of ours to send.
             walletOwner = me;
             lastMoney = c.Currency;
             lastKeys = c.KeyBullets;
@@ -442,7 +583,8 @@ namespace GungeonOnline
         {
             if (__instance.IsMetaCurrency || player == null || player != Me || !session.HalfMoney || !InSharedRun())
                 return;
-            float half = __instance.currencyValue * 0.5f + moneyCarry;
+            // Every game drops money for the same kills, so each pickup counts 1/players (half with two).
+            float half = __instance.currencyValue / (float)PlayersInRun() + moneyCarry;
             int give = Mathf.FloorToInt(half);
             moneyCarry = half - give;
             __instance.currencyValue = give;

@@ -24,7 +24,16 @@ namespace GungeonOnline
             public Vector2 Origin, Direction;
             public float LastHeard;
         }
-        private static readonly List<Shown> shown = new List<Shown>();
+        // Each other player's beams, by slot.
+        private static readonly List<Shown>[] shownBy = NewLists();
+
+        private static List<Shown>[] NewLists()
+        {
+            List<Shown>[] lists = new List<Shown>[Protocol.MaxPlayers];
+            for (int i = 0; i < lists.Length; i++)
+                lists[i] = new List<Shown>();
+            return lists;
+        }
 
         public static void Init(NetSession netSession)
         {
@@ -53,11 +62,13 @@ namespace GungeonOnline
         {
             if (session == null || session.Status != NetSession.State.Connected)
             {
-                Clear();
+                foreach (List<Shown> list in shownBy)
+                    Clear(list);
                 return;
             }
-            // Keep the shown beams where the partner said, every frame (they're drawn from their start point).
+            // Keep the shown beams where their player said, every frame (they're drawn from their start point).
             float now = Time.realtimeSinceStartup;
+            foreach (List<Shown> shown in shownBy)
             for (int i = shown.Count - 1; i >= 0; i--)
             {
                 Shown s = shown[i];
@@ -104,6 +115,7 @@ namespace GungeonOnline
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             bool here = me != null && level == LevelSync.CurrentLevelKey() && !GameManager.Instance.IsLoadingLevel;
             float now = Time.realtimeSinceStartup;
+            List<Shown> shown = shownBy[Mathf.Clamp(session.From, 0, shownBy.Length - 1)];
             for (int i = 0; i < n; i++)
             {
                 string prefabName = r.ReadString();
@@ -186,7 +198,7 @@ namespace GungeonOnline
             }
         }
 
-        private static void Clear()
+        private static void Clear(List<Shown> shown)
         {
             foreach (Shown s in shown)
                 Stop(s);

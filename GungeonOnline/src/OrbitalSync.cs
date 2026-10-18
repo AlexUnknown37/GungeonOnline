@@ -21,10 +21,19 @@ namespace GungeonOnline
             public Material Material;
             public Texture Texture;
         }
-        private static readonly List<Shown> shown = new List<Shown>();
+        // Each other player's orbitals, by slot.
+        private static readonly List<Shown>[] shownBy = NewLists();
+        private static readonly float[] lastReceivedAt = new float[Protocol.MaxPlayers];
+
+        private static List<Shown>[] NewLists()
+        {
+            List<Shown>[] lists = new List<Shown>[Protocol.MaxPlayers];
+            for (int i = 0; i < lists.Length; i++)
+                lists[i] = new List<Shown>();
+            return lists;
+        }
         private static readonly Dictionary<string, tk2dSpriteCollectionData> collections = new Dictionary<string, tk2dSpriteCollectionData>();
         private static float nextCollectionScanAt;
-        private static float lastReceivedAt = -100f;
 
         public static void Init(NetSession netSession)
         {
@@ -58,12 +67,16 @@ namespace GungeonOnline
         {
             if (session == null || session.Status != NetSession.State.Connected)
             {
-                Clear();
+                for (int i = 0; i < shownBy.Length; i++)
+                    Clear(shownBy[i]);
                 return;
             }
-            // Nothing heard for a while (partner has none now, or left the floor): hide ours.
-            if (shown.Count > 0 && Time.realtimeSinceStartup - lastReceivedAt > 1f)
-                Clear();
+            // Nothing heard from a player for a while (they have none now, or left the floor): hide theirs.
+            for (int i = 0; i < shownBy.Length; i++)
+            {
+                if (shownBy[i].Count > 0 && Time.realtimeSinceStartup - lastReceivedAt[i] > 1f)
+                    Clear(shownBy[i]);
+            }
 
             if (Time.realtimeSinceStartup < nextSendAt)
                 return;
@@ -105,7 +118,9 @@ namespace GungeonOnline
             int count = r.ReadByte();
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             bool here = me != null && level == LevelSync.CurrentLevelKey() && !GameManager.Instance.IsLoadingLevel;
-            lastReceivedAt = Time.realtimeSinceStartup;
+            int from = Mathf.Clamp(session.From, 0, shownBy.Length - 1);
+            List<Shown> shown = shownBy[from];
+            lastReceivedAt[from] = Time.realtimeSinceStartup;
             int used = 0;
             for (int i = 0; i < count; i++)
             {
@@ -120,7 +135,7 @@ namespace GungeonOnline
                 tk2dSpriteCollectionData collection = FindCollection(collectionName);
                 if (collection == null || spriteId < 0 || spriteId >= collection.spriteDefinitions.Length)
                     continue;
-                Shown s = GetShown(used, me);
+                Shown s = GetShown(shown, used, me);
                 if (s == null)
                     continue;
                 used++;
@@ -143,7 +158,7 @@ namespace GungeonOnline
             }
         }
 
-        private static Shown GetShown(int index, PlayerController me)
+        private static Shown GetShown(List<Shown> shown, int index, PlayerController me)
         {
             while (shown.Count <= index)
             {
@@ -157,8 +172,8 @@ namespace GungeonOnline
             if (shown[index].Sprite == null)
             {
                 // Destroyed by a floor change: start over.
-                Clear();
-                return GetShown(index, me);
+                Clear(shown);
+                return GetShown(shown, index, me);
             }
             return shown[index];
         }
@@ -180,7 +195,7 @@ namespace GungeonOnline
             return c;
         }
 
-        private static void Clear()
+        private static void Clear(List<Shown> shown)
         {
             foreach (Shown s in shown)
             {

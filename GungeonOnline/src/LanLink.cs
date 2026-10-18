@@ -9,7 +9,8 @@ namespace GungeonOnline
 {
     // LAN networking over plain UDP. The host listens on a port; a joiner sends to the host's IP.
     // UDP can lose or reorder packets, so "reliable" packets get a sequence number and are re-sent
-    // until the other side acknowledges them, then handed over in order.
+    // until the other side acknowledges them, then handed over in order. The host keeps that bookkeeping per
+    // guest (up to MaxPlayers - 1, by slot); a guest has one peer, the host (slot 0).
     public class LanLink : Transport
     {
         // Every LAN packet starts with "GO" so we ignore unrelated traffic on the port.
@@ -20,8 +21,8 @@ namespace GungeonOnline
         public enum PacketKind : byte
         {
             Unreliable = 1,
-            Reliable = 2,     // + ushort sequence number
-            Ack = 3,          // + ushort sequence number being acknowledged
+            Reliable = 2,     // + ushort sequence number + ushort epoch
+            Ack = 3,          // + ushort sequence number being acknowledged + ushort epoch
             Discover = 4,     // "any hosts out there?" (broadcast by LanDiscovery)
             DiscoverReply = 5 // host's name + port
         }
@@ -33,22 +34,38 @@ namespace GungeonOnline
             public float LastSent;
         }
 
+        // Each side numbers its reliable packets per "epoch", a random number picked when it starts talking to a
+        // peer. When one side starts over (the host dropped a player who timed out, a player rejoined), the other
+        // sees a new epoch and starts counting from there, instead of waiting forever for a number that will
+        // never come (which left a dropped player half-connected).
+        private static readonly System.Random epochs = new System.Random();
+
+        private class Peer
+        {
+            public IPEndPoint EndPoint;
+            public ushort NextSendSeq;
+            public ushort NextRecvSeq;
+            public readonly ushort SendEpoch = (ushort)epochs.Next(1, 65536);
+            public int RecvEpoch = -1;
+            public readonly List<Pending> Unacked = new List<Pending>();
+            public readonly Dictionary<ushort, byte[]> Early = new Dictionary<ushort, byte[]>();
+            public Peer(IPEndPoint ep) { EndPoint = ep; }
+        }
+
         private readonly UdpClient udp;
         private readonly bool isHost;
         private readonly int port;
-        private IPEndPoint peer;
+        private readonly IPEndPoint hostAddress;    // joiner: where the host is
+        private readonly Peer[] peers = new Peer[Protocol.MaxPlayers]; // by slot
 
-        private ushort nextSendSeq;
-        private ushort nextRecvSeq;
-        private readonly List<Pending> unacked = new List<Pending>();
-        private readonly Dictionary<ushort, byte[]> early = new Dictionary<ushort, byte[]>();
-
-        private LanLink(UdpClient udp, bool isHost, int port, IPEndPoint peer)
+        private LanLink(UdpClient udp, bool isHost, int port, IPEndPoint host)
         {
             this.udp = udp;
             this.isHost = isHost;
             this.port = port;
-            this.peer = peer;
+            hostAddress = host;
+            if (host != null)
+                peers[0] = new Peer(host);
         }
 
         public static LanLink Host(int port)
@@ -78,7 +95,7 @@ namespace GungeonOnline
         public override bool IsHost { get { return isHost; } }
         public override string Info
         {
-            get { return isHost ? "Your LAN address: " + LocalAddress() + ":" + port : "Host: " + peer; }
+            get { return isHost ? "Your LAN address: " + LocalAddress() + ":" + port : "Host: " + hostAddress; }
         }
 
         private readonly byte[] receiveBuffer = new byte[65536];
@@ -104,48 +121,68 @@ namespace GungeonOnline
             }
 
             float now = Time.realtimeSinceStartup;
-            for (int i = 0; i < unacked.Count; i++)
+            foreach (Peer peer in peers)
             {
-                if (now - unacked[i].LastSent >= ResendInterval)
+                if (peer == null)
+                    continue;
+                for (int i = 0; i < peer.Unacked.Count; i++)
                 {
-                    unacked[i].LastSent = now;
-                    SendRaw(unacked[i].Packet, peer);
+                    if (now - peer.Unacked[i].LastSent >= ResendInterval)
+                    {
+                        peer.Unacked[i].LastSent = now;
+                        SendRaw(peer.Unacked[i].Packet, peer.EndPoint);
+                    }
                 }
             }
         }
 
-        public override void Send(byte[] data, bool reliable)
+        public override void Send(int slot, byte[] data, bool reliable)
         {
-            if (peer == null)
-                return;
-            if (!reliable)
+            byte[] unreliablePacket = null;
+            for (int i = 0; i < peers.Length; i++)
             {
-                SendRaw(Wrap(PacketKind.Unreliable, null, data), peer);
-                return;
+                Peer peer = peers[i];
+                if (peer == null || (slot != Everyone && slot != i))
+                    continue;
+                if (!reliable)
+                {
+                    if (unreliablePacket == null)
+                        unreliablePacket = Wrap(PacketKind.Unreliable, null, data);
+                    SendRaw(unreliablePacket, peer.EndPoint);
+                    continue;
+                }
+                Pending p = new Pending();
+                p.Seq = peer.NextSendSeq++;
+                p.Packet = Wrap(PacketKind.Reliable, p.Seq, data, peer.SendEpoch);
+                p.LastSent = Time.realtimeSinceStartup;
+                peer.Unacked.Add(p);
+                SendRaw(p.Packet, peer.EndPoint);
             }
-            Pending p = new Pending();
-            p.Seq = nextSendSeq++;
-            p.Packet = Wrap(PacketKind.Reliable, p.Seq, data);
-            p.LastSent = Time.realtimeSinceStartup;
-            unacked.Add(p);
-            SendRaw(p.Packet, peer);
         }
 
-        public override void DropPeer()
+        public override void DropPeer(int slot)
         {
-            // A joiner keeps the host's address so Close() still knows where it was.
-            if (isHost)
-                peer = null;
-            nextSendSeq = 0;
-            nextRecvSeq = 0;
-            unacked.Clear();
-            early.Clear();
+            if (slot < 0 || slot >= peers.Length)
+                return;
+            // A joiner keeps the host's address (fresh bookkeeping) so a later hello still knows where to go.
+            peers[slot] = !isHost && slot == 0 && hostAddress != null ? new Peer(hostAddress) : null;
         }
 
         public override void Close()
         {
-            DropPeer();
+            for (int i = 0; i < peers.Length; i++)
+                peers[i] = null;
             udp.Close();
+        }
+
+        private int SlotOf(IPEndPoint from)
+        {
+            for (int i = 0; i < peers.Length; i++)
+            {
+                if (peers[i] != null && peers[i].EndPoint.Equals(from))
+                    return i;
+            }
+            return -1;
         }
 
         private void HandleDatagram(byte[] data, IPEndPoint from)
@@ -161,44 +198,66 @@ namespace GungeonOnline
                 return;
             }
 
-            if (peer == null || !peer.Equals(from))
+            int slot = SlotOf(from);
+            if (slot < 0)
             {
-                // The host takes the first player that sends it game data as its partner.
-                if (!(isHost && peer == null && kind == PacketKind.Reliable))
+                // The host takes players that send it game data into the lowest free slot.
+                if (!isHost || kind != PacketKind.Reliable)
                     return;
-                peer = from;
-                Plugin.Log.LogInfo("LAN partner connected from " + from);
+                for (int i = 1; i < peers.Length && slot < 0; i++)
+                {
+                    if (peers[i] == null)
+                        slot = i;
+                }
+                if (slot < 0)
+                {
+                    Plugin.Log.LogWarning("Game is full: ignoring LAN player at " + from);
+                    return;
+                }
+                peers[slot] = new Peer(from);
+                Plugin.Log.LogInfo("LAN player connected from " + from + " (slot " + slot + ")");
             }
+            Peer peer = peers[slot];
 
             switch (kind)
             {
                 case PacketKind.Unreliable:
-                    RaisePacket(data, 3, data.Length - 3);
+                    RaisePacket(slot, data, 3, data.Length - 3);
                     break;
 
                 case PacketKind.Ack:
-                    if (data.Length < 5) return;
+                    if (data.Length < 7) return;
                     ushort acked = BitConverter.ToUInt16(data, 3);
-                    unacked.RemoveAll(delegate (Pending p) { return p.Seq == acked; });
+                    if (BitConverter.ToUInt16(data, 5) != peer.SendEpoch)
+                        return; // an ack for an older connection
+                    peer.Unacked.RemoveAll(delegate (Pending p) { return p.Seq == acked; });
                     break;
 
                 case PacketKind.Reliable:
-                    if (data.Length < 5) return;
+                    if (data.Length < 7) return;
                     ushort seq = BitConverter.ToUInt16(data, 3);
-                    SendRaw(Wrap(PacketKind.Ack, seq, null), from);
-                    short ahead = (short)(seq - nextRecvSeq);
+                    ushort epoch = BitConverter.ToUInt16(data, 5);
+                    SendRaw(Wrap(PacketKind.Ack, seq, null, epoch), from);
+                    if (peer.RecvEpoch != epoch)
+                    {
+                        // They started over (or this is the first packet): count from here.
+                        peer.RecvEpoch = epoch;
+                        peer.NextRecvSeq = seq;
+                        peer.Early.Clear();
+                    }
+                    short ahead = (short)(seq - peer.NextRecvSeq);
                     if (ahead < 0)
                         return; // already delivered; our ack was lost, so they re-sent
-                    byte[] body = new byte[data.Length - 5];
-                    Buffer.BlockCopy(data, 5, body, 0, body.Length);
-                    early[seq] = body;
-                    // Hand over everything that's now in order.
+                    byte[] body = new byte[data.Length - 7];
+                    Buffer.BlockCopy(data, 7, body, 0, body.Length);
+                    peer.Early[seq] = body;
+                    // Hand over everything that's now in order (stop if handling one dropped this peer).
                     byte[] next;
-                    while (early.TryGetValue(nextRecvSeq, out next))
+                    while (peers[slot] == peer && peer.Early.TryGetValue(peer.NextRecvSeq, out next))
                     {
-                        early.Remove(nextRecvSeq);
-                        nextRecvSeq++;
-                        RaisePacket(next, 0, next.Length);
+                        peer.Early.Remove(peer.NextRecvSeq);
+                        peer.NextRecvSeq++;
+                        RaisePacket(slot, next, 0, next.Length);
                     }
                     break;
             }
@@ -218,9 +277,9 @@ namespace GungeonOnline
             }
         }
 
-        public static byte[] Wrap(PacketKind kind, ushort? seq, byte[] body)
+        public static byte[] Wrap(PacketKind kind, ushort? seq, byte[] body, ushort epoch = 0)
         {
-            int header = seq.HasValue ? 5 : 3;
+            int header = seq.HasValue ? 7 : 3;
             byte[] packet = new byte[header + (body != null ? body.Length : 0)];
             packet[0] = Magic0;
             packet[1] = Magic1;
@@ -229,6 +288,8 @@ namespace GungeonOnline
             {
                 packet[3] = (byte)(seq.Value & 0xFF);
                 packet[4] = (byte)(seq.Value >> 8);
+                packet[5] = (byte)(epoch & 0xFF);
+                packet[6] = (byte)(epoch >> 8);
             }
             if (body != null)
                 Buffer.BlockCopy(body, 0, packet, header, body.Length);

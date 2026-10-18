@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.101.0";
+        public const string ModVersion = "0.102.0";
 
         public static ManualLogSource Log;
 
@@ -25,13 +25,20 @@ namespace GungeonOnline
         public static ConfigEntry<string> LastLanAddress;
         public static ConfigEntry<bool> Pvp;
         public static ConfigEntry<bool> HalfMoney;
+        public static ConfigEntry<bool> TeleportToFights;
+        public static ConfigEntry<bool> ShowPartyList;
+        public static ConfigEntry<bool> ScaleEnemyHealth;
+        public static ConfigEntry<float> HealthPerExtraPlayer;
+        public static ConfigEntry<KeyCode> TakeABreakKey;
+        public static ConfigEntry<KeyCode> AcceptRestartKey;
         public static ConfigEntry<bool> ShowPartnerName;
         private ConfigEntry<KeyCode> toggleWindowKey;
 
         private NetSession session;
         private DebugWindow window;
-        private readonly RemotePuppet puppet = new RemotePuppet();
-        private readonly PetPuppet petPuppet = new PetPuppet();
+        // One character picture (and companion picture) per other player, by slot.
+        public static readonly RemotePuppet[] Puppets = new RemotePuppet[Protocol.MaxPlayers];
+        public static readonly PetPuppet[] Pets = new PetPuppet[Protocol.MaxPlayers];
         private bool steamChecked;
 
         private void Awake()
@@ -49,6 +56,20 @@ namespace GungeonOnline
                 "When you host: players' bullets can hurt each other. Joiners follow the host's setting.");
             ShowPartnerName = Config.Bind("Display", "ShowPartnerName", true,
                 "Show your partner's name above their character. Only changes your own screen.");
+            AcceptRestartKey = Config.Bind("General", "AcceptRestartKey", KeyCode.F7,
+                "When you host and a player asks to Quick Restart while you're still playing: this key restarts the run.");
+            TakeABreakKey = Config.Bind("General", "TakeABreakKey", KeyCode.F6,
+                "Take a Break: the bot plays your character until you move again.");
+            ScaleEnemyHealth = Config.Bind("Rules", "ScaleEnemyHealth", true,
+                "When you host: enemies get more health the more players there are (stacks with Loop The Gungeon). " +
+                "Joiners follow the host's setting.");
+            HealthPerExtraPlayer = Config.Bind("Rules", "HealthPerExtraPlayer", 0.5f,
+                "When you host: extra enemy health for each player beyond the first (0.5 = +50%: x1.5 with 2 players, x2 with 3, x2.5 with 4).");
+            ShowPartyList = Config.Bind("Display", "ShowPartyList", true,
+                "Show the other players (character and health) on the right side of the screen.");
+            TeleportToFights = Config.Bind("Rules", "TeleportToFights", true,
+                "When you host: when a player walks into a fight (the room locks), everyone else is teleported there. " +
+                "Joiners follow the host's setting.");
             HalfMoney = Config.Bind("Rules", "HalfMoney", true,
                 "When you host: money pickups count half online. The purse is shared and both games drop money, " +
                 "so this keeps a run's income close to solo. Joiners follow the host's setting.");
@@ -63,15 +84,26 @@ namespace GungeonOnline
                 if (args[i] == "--gungeon-online-test-run")
                     testRunCharacter = args[i + 1].Trim();
             }
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i] == "--gungeon-online-bot")
+                    testBot = true;
+            }
 
             AllocProfiler.Init();
+            for (int i = 0; i < Protocol.MaxPlayers; i++)
+            {
+                Puppets[i] = new RemotePuppet();
+                Pets[i] = new PetPuppet();
+            }
             session = new NetSession();
-            window = new DebugWindow(session, puppet);
+            window = new DebugWindow(session);
             Harmony harmony = new Harmony(Guid);
             LevelSync.Init(session, harmony);
             BulletSync.Init(session, harmony);
             DeathSync.Init(session, harmony);
             EnemySync.Init(session, harmony);
+            AttackSync.Init(session, harmony);
             ThrowSync.Init(session, harmony);
             BlankSync.Init(session, harmony);
             MenuButtons.Init(harmony);
@@ -79,7 +111,7 @@ namespace GungeonOnline
             MultiplayerMenu.Init(session);
             PauseSync.Init(session);
             WorldSync.Init(session, harmony);
-            PetSync.Init(session, petPuppet);
+            PetSync.Init(session);
             TargetSync.Init(session, harmony);
             PlayerWarp.Init(session);
             SaveSync.Init(session, harmony);
@@ -92,6 +124,11 @@ namespace GungeonOnline
             ShopBan.Init(session, harmony);
             BeamSync.Init(session);
             ExpandSync.Init(session, harmony);
+            Autopilot.Init(session, harmony);
+            BreakButton.Init(session, harmony);
+            StandIn.Init(session, harmony);
+            DifficultySync.Init(session, harmony);
+            TablePush.Init(session);
             BreachCultist.Init(session, harmony);
             InventorySync.Init(session);
             PartnerMapMarker.Init(session);
@@ -105,6 +142,7 @@ namespace GungeonOnline
         // Testing floor sync: "--gungeon-online-test-run Rogue" picks that character on the Breach's select screen;
         // the host then starts a run once the partner has picked theirs (the joiner follows the host).
         private static string testRunCharacter = "";
+        private static bool testBot;   // "--gungeon-online-bot": this test copy plays itself (Take a Break, always on)
         private static bool testPicked, testRunStarted;
         private static float testPickedAt;
 
@@ -113,6 +151,11 @@ namespace GungeonOnline
             if (testRunCharacter.Length == 0 || testRunStarted || session.Status != NetSession.State.Connected || !GameManager.HasInstance)
                 return;
             GameManager gm = GameManager.Instance;
+            if (!gm.IsFoyer && gm.PrimaryPlayer != null && !gm.IsLoadingLevel)
+            {
+                testRunStarted = true; // in a run: the test start is done (later Breach visits are the game's own)
+                return;
+            }
             if (!gm.IsFoyer || gm.IsLoadingLevel || Foyer.Instance == null)
                 return;
             if (!testPicked)
@@ -132,16 +175,145 @@ namespace GungeonOnline
                 }
                 return;
             }
-            // Host: start the run once both have a character (and things settled).
-            if (!session.Link.IsHost || gm.IsSelectingCharacter || gm.PrimaryPlayer == null || !session.Remote.HasPlayer
-                || Time.realtimeSinceStartup - testPickedAt < 8f)
+            if (gm.IsSelectingCharacter || gm.PrimaryPlayer == null || Time.realtimeSinceStartup - testPickedAt < 8f)
                 return;
+            // Guest that arrived after the host started: take the elevator, which joins the host's run.
+            if (!session.Link.IsHost)
+            {
+                if (!LevelSync.HostInRun)
+                    return;
+                testRunStarted = true;
+                Log.LogInfo("Test run: guest joining the host's run.");
+                Foyer.Instance.OnDepartedFoyer();
+                gm.DelayedLoadNextLevel(0.5f);
+                return;
+            }
+            // Host: start the run once everyone has a character (and things settled).
+            foreach (RemotePlayerState p in session.Remotes)
+            {
+                if (!p.HasPlayer)
+                    return;
+            }
             testRunStarted = true;
             Log.LogInfo("Test run: host starting the run.");
             if (Pixelator.Instance != null)
                 Pixelator.Instance.FadeToBlack(0.5f, false, 0f);
             Foyer.Instance.OnDepartedFoyer();
             gm.DelayedLoadNextLevel(0.5f);
+        }
+
+        // Test copies only. K: warp our player 2 tiles below the nearest table that isn't flipped yet.
+        // L: write our health and the nearest table's state to the log. B: go back to the Breach.
+        private static bool testMode;
+        private static FlippableCover testTable;
+
+        private void TestWarpToTable()
+        {
+            if (!testMode || !GameManager.HasInstance)
+                return;
+            PlayerController me = GameManager.Instance.PrimaryPlayer;
+            if (me == null)
+                return;
+            if (Input.GetKeyDown(KeyCode.L))
+            {
+                HealthHaver h = me.healthHaver;
+                Log.LogInfo("Test: " + me.characterIdentity + " health " + h.GetCurrentHealth() + "/" + h.GetMaxHealth() + ", armor " + h.Armor
+                    + ", game type " + GameManager.Instance.CurrentGameType + ", vulnerable " + h.IsVulnerable + ", rolling " + me.IsDodgeRolling
+                    + ", input " + me.CurrentInputState + ", reviving " + me.IsCurrentlyCoopReviving + ", ghost " + me.IsGhost
+                    + ", hitbox " + (me.specRigidbody != null && me.specRigidbody.HitboxPixelCollider != null && me.specRigidbody.HitboxPixelCollider.Enabled)
+                    + ", collides " + (me.specRigidbody != null && me.specRigidbody.CollideWithOthers));
+                FlippableCover t = testTable != null ? testTable : NearestTable(me, true);
+                if (t != null)
+                    Log.LogInfo("Test: table '" + t.name + "' transform " + t.transform.position + ", body " + (t.specRigidbody != null
+                        ? t.specRigidbody.UnitCenter + " pushable " + t.specRigidbody.CanBePushed + " on " + t.specRigidbody.gameObject.name : "none")
+                        + ", flipped " + t.IsFlipped + ", tracked " + WorldSync.Describe(t));
+            }
+            // G: get an AK-47 (a gun that isn't anyone's starting gun, to test gear being kept).
+            if (Input.GetKeyDown(KeyCode.G))
+            {
+                Gun ak = PickupObjectDatabase.GetById(15) as Gun;
+                if (ak != null)
+                {
+                    me.inventory.AddGunToInventory(ak, true);
+                    Log.LogInfo("Test: got " + ak.name + ".");
+                }
+                return;
+            }
+            // X: die (to test deaths, game overs and restarts).
+            if (Input.GetKeyDown(KeyCode.X) && !GameManager.Instance.IsFoyer && !me.IsGhost && !me.healthHaver.IsDead)
+            {
+                Log.LogInfo("Test: dying.");
+                me.healthHaver.Armor = 0f;
+                me.healthHaver.ApplyDamage(10000f, Vector2.zero, "Test", CoreDamageTypes.None, DamageCategory.Unstoppable, true, null, true);
+                return;
+            }
+            // R: press Quick Restart on the death screen (as a player clicking it).
+            if (Input.GetKeyDown(KeyCode.R) && LevelSync.DeathPageUp())
+            {
+                Log.LogInfo("Test: pressing Quick Restart.");
+                LevelSync.PressQuickRestart();
+                return;
+            }
+            // H: 5 more heart containers, healed (to test lots of hearts).
+            if (Input.GetKeyDown(KeyCode.H) && !me.IsGhost)
+            {
+                float max = me.healthHaver.GetMaxHealth() + 5f;
+                me.healthHaver.SetHealthMaximum(max, 5f, false);
+                Log.LogInfo("Test: max health now " + max + ".");
+                return;
+            }
+            // J (host): start a Loop The Gungeon loop, the same way its rift at the Forge does.
+            if (Input.GetKeyDown(KeyCode.J) && !GameManager.Instance.IsFoyer && !GameManager.Instance.IsLoadingLevel
+                && session.Link != null && session.Link.IsHost)
+            {
+                System.Type tube = HarmonyLib.AccessTools.TypeByName("LoopTheGungeon.Util.TimeTubeTransition");
+                System.Reflection.MethodInfo start = tube != null ? HarmonyLib.AccessTools.Method(tube, "StartLoopTimeTubeThenLoop") : null;
+                if (start == null)
+                    Log.LogInfo("Test: Loop The Gungeon isn't installed.");
+                else
+                {
+                    Log.LogInfo("Test: starting a loop.");
+                    start.Invoke(null, new object[] { GameManager.Instance, 0f });
+                }
+                return;
+            }
+            // B: go back to the Breach mid-run (like quitting to the Breach).
+            if (Input.GetKeyDown(KeyCode.B) && !GameManager.Instance.IsFoyer && !GameManager.Instance.IsLoadingLevel)
+            {
+                Log.LogInfo("Test: going back to the Breach.");
+                GameManager.Instance.LoadCharacterSelect(true, false);
+                return;
+            }
+            if (!Input.GetKeyDown(KeyCode.K))
+                return;
+            FlippableCover best = NearestTable(me, false);
+            if (best == null)
+            {
+                Log.LogInfo("Test: no unflipped table on this floor.");
+                return;
+            }
+            testTable = best;
+            Vector2 spot = best.specRigidbody.UnitBottomCenter + new Vector2(0f, -2f);
+            Log.LogInfo("Test: warping 2 tiles below table '" + best.name + "' at " + best.specRigidbody.UnitCenter + ".");
+            me.WarpToPoint(spot, false, false);
+        }
+
+        private static FlippableCover NearestTable(PlayerController me, bool flippedToo)
+        {
+            FlippableCover best = null;
+            float bestDist = float.MaxValue;
+            foreach (FlippableCover t in Resources.FindObjectsOfTypeAll<FlippableCover>())
+            {
+                if (t == null || !t.gameObject.scene.IsValid() || (t.IsFlipped && !flippedToo) || t.IsBroken || t.specRigidbody == null)
+                    continue;
+                float d = Vector2.Distance(t.specRigidbody.UnitCenter, me.CenterPosition);
+                if (d < bestDist)
+                {
+                    best = t;
+                    bestDist = d;
+                }
+            }
+            return best;
         }
 
         private void TestStartWhenReady()
@@ -152,6 +324,7 @@ namespace GungeonOnline
             if (title == null || title.NewGameButton == null || !title.NewGameButton.IsVisible)
                 return;
             string mode = testStart;
+            testMode = true;
             testStart = "";
             Log.LogInfo("Test start: " + mode);
             bool ok = mode == "host" ? session.HostLan(LanPort.Value)
@@ -180,7 +353,10 @@ namespace GungeonOnline
             if (Input.GetKeyDown(toggleWindowKey.Value))
                 window.Visible = !window.Visible;
             if (Input.GetKeyDown(KeyCode.F9))
-                puppet.DebugDump();
+            {
+                foreach (RemotePlayerState p in session.Remotes)
+                    Puppets[p.Slot].DebugDump();
+            }
 
             // The game starts Steam itself (SteamManager). Once it has, enable the Steam option.
             if (!steamChecked && SteamManager.Initialized)
@@ -193,6 +369,33 @@ namespace GungeonOnline
             { long __m = AllocProfiler.Begin(); session.Update(); AllocProfiler.End("session.Update", __m); }
             { long __m = AllocProfiler.Begin(); TestStartWhenReady(); AllocProfiler.End("TestStartWhenReady", __m); }
             TestRunWhenReady();
+            // Test bots hosting: after a game over, start a new run by themselves (the guests follow).
+            if (!testBot || session.Link == null || !session.Link.IsHost)
+                deathPageUp = false;
+            else if (Time.frameCount % 30 == 0)
+                deathPageUp = LevelSync.DeathPageUp(); // twice a second is plenty
+            if (deathPageUp)
+            {
+                if (deathScreenSince < 0f)
+                    deathScreenSince = Time.realtimeSinceStartup;
+                else if (Time.realtimeSinceStartup - deathScreenSince > 6f)
+                {
+                    deathScreenSince = -1f;
+                    Log.LogInfo("Test: game over - quick restarting.");
+                    LevelSync.PressQuickRestart();
+                }
+            }
+            else
+                deathScreenSince = -1f;
+            if (testBot && !Autopilot.Active && GameManager.HasInstance && GameManager.Instance.PrimaryPlayer != null && !GameManager.Instance.IsFoyer)
+            {
+                Autopilot.Explore = true; // test bots: the living one with the lowest player number leads the way
+                Autopilot.Start(true);
+            }
+            { long __m = AllocProfiler.Begin(); Autopilot.Update(); AllocProfiler.End("Autopilot.Update", __m); }
+            { long __m = AllocProfiler.Begin(); StandIn.Update(); AllocProfiler.End("StandIn.Update", __m); }
+            DifficultySync.Update();
+            TestWarpToTable();
 
             // While playing online the game must keep running when its window isn't focused: otherwise Unity
             // stops completely on tab-out, nothing is sent, and the partner times out. (Keep Running does this
@@ -221,17 +424,31 @@ namespace GungeonOnline
             { long __m = AllocProfiler.Begin(); MenuButtons.Update(); AllocProfiler.End("MenuButtons.Update", __m); }
             if (steamChecked)
                 { long __m = AllocProfiler.Begin(); SteamFriendsList.UpdateOwnPresence(session); AllocProfiler.End("SteamFriendsList.UpdateOwnPresence", __m); }
+            { long __m = AllocProfiler.Begin(); TablePush.Update(); AllocProfiler.End("TablePush.Update", __m); }
             { long __m = AllocProfiler.Begin(); WorldSync.Update(); AllocProfiler.End("WorldSync.Update", __m); }
             { long __m = AllocProfiler.Begin(); EnemySync.Update(); AllocProfiler.End("EnemySync.Update", __m); }
+            AttackSync.Update();
             { long __m = AllocProfiler.Begin(); TargetSync.Update(); AllocProfiler.End("TargetSync.Update", __m); }
             { long __m = AllocProfiler.Begin(); PlayerWarp.Update(); AllocProfiler.End("PlayerWarp.Update", __m); }
-            { long __m = AllocProfiler.Begin(); puppet.Update(session.Remote, session.Status == NetSession.State.Connected); AllocProfiler.End("puppet.Update", __m); }
-            { long __m = AllocProfiler.Begin(); petPuppet.Update(session.Remote, puppet.Status.StartsWith("shown")); AllocProfiler.End("petPuppet.Update", __m); }
+            {
+                long __m = AllocProfiler.Begin();
+                bool connected = session.Status == NetSession.State.Connected;
+                for (int i = 0; i < Protocol.MaxPlayers; i++)
+                {
+                    RemotePlayerState p = session.Players[i];
+                    bool here = connected && p.Connected && i != session.LocalSlot && !LoopSync.TubePlaying;
+                    Puppets[i].Update(p, here);
+                    Pets[i].Update(p, here && Puppets[i].Status.StartsWith("shown"));
+                }
+                AllocProfiler.End("puppets.Update", __m);
+            }
             { long __m = AllocProfiler.Begin(); PetSync.Update(); AllocProfiler.End("PetSync.Update", __m); }
             AllocProfiler.Report();
         }
 
         private GameCursorController gameCursor;
+        private float deathScreenSince = -1f;
+        private bool deathPageUp;
 
         private void OnGUI()
         {
@@ -240,6 +457,8 @@ namespace GungeonOnline
             long __g = AllocProfiler.Begin();
             SaveSlotLabel.Draw();
             Toast.Draw();
+            if (ShowPartyList.Value)
+                PartyList.Draw(session);
             window.Draw();
             MultiplayerMenu.Draw();
 

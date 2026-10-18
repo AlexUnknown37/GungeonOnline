@@ -2,7 +2,7 @@ using UnityEngine;
 
 namespace GungeonOnline
 {
-    // Shows the online partner on the minimap and the full map with their character's own map icon (from their
+    // Shows every other online player on the minimap and the full map with their character's own map icon (from their
     // character's prefab), or a tinted copy of our marker if that can't be found. It's moved
     // to the partner's position the same way the game places player markers (Minimap.UpdatePlayerPositionExact:
     // minimap position + world position / 8, one unit in front).
@@ -11,10 +11,10 @@ namespace GungeonOnline
         private static readonly Color Tint = new Color(0.45f, 0.85f, 1f);
 
         private static NetSession session;
-        private static GameObject marker;
-        private static Minimap markerMap;
-        private static int markerIdentity = -1;
-        private static string markerCustom = "";
+        private static readonly GameObject[] markers = new GameObject[Protocol.MaxPlayers];
+        private static readonly Minimap[] markerMaps = new Minimap[Protocol.MaxPlayers];
+        private static readonly int[] markerIdentities = new int[Protocol.MaxPlayers];
+        private static readonly string[] markerCustoms = new string[Protocol.MaxPlayers];
 
         public static void Init(NetSession netSession)
         {
@@ -23,43 +23,49 @@ namespace GungeonOnline
 
         public static void Update()
         {
+            if (session == null)
+                return;
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             Minimap map = Minimap.Instance;
-            bool show = session != null && session.Status == NetSession.State.Connected && me != null && map != null
-                && session.Remote.HasPlayer && session.Remote.Scene == LevelSync.CurrentLevelKey()
-                && !GameManager.Instance.IsLoadingLevel;
-            if (!show)
+            bool canShow = session.Status == NetSession.State.Connected && me != null && map != null && !GameManager.Instance.IsLoadingLevel;
+            string level = canShow ? LevelSync.CurrentLevelKey() : "";
+            for (int i = 0; i < markers.Length; i++)
             {
-                if (marker != null)
-                    marker.SetActive(false);
-                return;
+                RemotePlayerState r = session.Players[i];
+                bool show = canShow && i != session.LocalSlot && r.Connected && r.HasPlayer && r.Scene == level;
+                if (!show)
+                {
+                    if (markers[i] != null)
+                        markers[i].SetActive(false);
+                    continue;
+                }
+                if (markers[i] == null || markerMaps[i] != map || markerIdentities[i] != r.Identity || markerCustoms[i] != r.CustomCharacter)
+                {
+                    if (markers[i] != null)
+                        Object.Destroy(markers[i]);
+                    markers[i] = MakeMarker(me, map, r);
+                    if (markers[i] == null)
+                        continue;
+                    markerMaps[i] = map;
+                    markerIdentities[i] = r.Identity;
+                    markerCustoms[i] = r.CustomCharacter;
+                }
+                if (!markers[i].activeSelf)
+                    markers[i].SetActive(true);
+                Vector2 p = r.Position;
+                markers[i].transform.position = map.transform.position + new Vector3(p.x * 0.125f, p.y * 0.125f, -1f);
             }
-            if (marker == null || markerMap != map || markerIdentity != session.Remote.Identity || markerCustom != session.Remote.CustomCharacter)
-            {
-                if (marker != null)
-                    Object.Destroy(marker);
-                marker = MakeMarker(me, map);
-                if (marker == null)
-                    return;
-                markerMap = map;
-                markerIdentity = session.Remote.Identity;
-                markerCustom = session.Remote.CustomCharacter;
-            }
-            if (!marker.activeSelf)
-                marker.SetActive(true);
-            Vector2 p = session.Remote.Position;
-            marker.transform.position = map.transform.position + new Vector3(p.x * 0.125f, p.y * 0.125f, -1f);
         }
-    
-        // The partner's character icon; our own icon, tinted, if their character's prefab has none.
-        private static GameObject MakeMarker(PlayerController me, Minimap map)
+
+        // The player's character icon; our own icon, tinted, if their character's prefab has none.
+        private static GameObject MakeMarker(PlayerController me, Minimap map, RemotePlayerState remote)
         {
             GameObject icon = null;
             bool own = false;
             try
             {
                 string description;
-                GameObject prefab = CustomCharacterSupport.PartnerPrefab(session.Remote, out description);
+                GameObject prefab = CustomCharacterSupport.PartnerPrefab(remote, out description);
                 PlayerController template = prefab != null ? prefab.GetComponent<PlayerController>() : null;
                 if (template != null)
                     icon = template.minimapIconPrefab;

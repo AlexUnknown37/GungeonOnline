@@ -1,8 +1,8 @@
 {
   "name": "Gungeon_Online",
-  "version_number": "0.101.0",
-  "website_url": "",
-  "description": "Online co-op for Enter the Gungeon over Steam or LAN. Early prototype: host, invite or join a friend, and see each other's position.",
+  "version_number": "0.102.0",
+  "website_url": "https://github.com/AlexUnknown37/GungeonOnline",
+  "description": "Online co-op for up to 4 players over Steam or LAN. Shared runs, enemies, loot, ghosts and revives; bots take over for players who drop out; Loop The Gungeon support. Very early alpha.",
   "dependencies": [
     "BepInEx-BepInExPack_EtG-5.4.2101"
   ]

@@ -65,6 +65,12 @@ namespace GungeonOnline
         }
         private static readonly Dictionary<Projectile, Tracked> ours = new Dictionary<Projectile, Tracked>();
         private static readonly Dictionary<int, Projectile> theirs = new Dictionary<int, Projectile>();
+
+        // Bullet numbers are per player, so the copies are kept by sender and number.
+        private static int TheirKey(int netId)
+        {
+            return netId * Protocol.MaxPlayers + Mathf.Clamp(session.From, 0, Protocol.MaxPlayers - 1);
+        }
         private static int nextNetId;
         private static float nextCourseSendAt;
         private const int MaxCoursesPerSend = 24;
@@ -151,7 +157,7 @@ namespace GungeonOnline
                 float angle = r.ReadSingle();
                 float speed = r.ReadSingle();
                 Projectile pr;
-                if (!here || !theirs.TryGetValue(id, out pr) || pr == null || !pr.isActiveAndEnabled)
+                if (!here || !theirs.TryGetValue(TheirKey(id), out pr) || pr == null || !pr.isActiveAndEnabled)
                     continue;
                 Vector3 t = pr.transform.position;
                 pr.transform.position = new Vector3(pos.x, pos.y, t.z);
@@ -191,8 +197,11 @@ namespace GungeonOnline
         {
             if (spawningRemote || session == null || session.Status != NetSession.State.Connected)
                 return;
-            if (!GameManager.HasInstance || __instance.CurrentOwner == null
-                || __instance.CurrentOwner != GameManager.Instance.PrimaryPlayer)
+            if (!GameManager.HasInstance || __instance.CurrentOwner == null)
+                return;
+            // Our own shots, or (host) the stand-in's, sent as the player it plays for.
+            bool standIn = StandIn.Active && __instance.CurrentOwner == StandIn.Player;
+            if (__instance.CurrentOwner != GameManager.Instance.PrimaryPlayer && !standIn)
                 return;
             Projectile p = __instance.LastProjectile;
             if (p == null || lastPrefab == null || p.gameObject != lastSpawned)
@@ -211,6 +220,10 @@ namespace GungeonOnline
             // lost packet held back every later bullet, which then all came out at once (late "burst fire").
             // A bullet that's lost now is only missing from the partner's screen (damage is decided by
             // whoever's bullet it is).
+            if (standIn)
+                Protocol.SendAs = StandIn.Slot;
+            try
+            {
             session.SendUnreliable(MsgType.Shot, delegate (BinaryWriter w)
             {
                 w.Write(level);
@@ -224,6 +237,11 @@ namespace GungeonOnline
                 w.Write(gunId);
                 w.Write(netId);
             });
+            }
+            finally
+            {
+                Protocol.SendAs = -1;
+            }
         }
 
         // ---- The partner's gun sounds and shell casings ----
@@ -332,7 +350,7 @@ namespace GungeonOnline
                 return;
 
             remoteProjectiles.Add(p);
-            theirs[netId] = p;
+            theirs[TheirKey(netId)] = p;
 
             // Pooled projectiles keep their last owner; make sure this one belongs to nobody here,
             // so it doesn't trigger our items or count as our kill.

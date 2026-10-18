@@ -49,6 +49,114 @@ namespace GungeonOnline
         public static bool WaitingToJoin;
         // Joiner: we pressed Quick Restart before the host did; we restart when the host does.
         public static bool WaitingForHost;
+
+        // Host: a player asked to restart while we're still playing; our key accepts it until then.
+        private static float restartAskedUntil = -1f;
+        private static string restartAskedBy = "";
+
+        // Host: a player pressed Quick Restart. On our death screen we restart right away (as if we'd pressed it);
+        // still playing, we're asked.
+        // The Ammonomicon (item book, death page) is open or opening. Safe while the game is still setting it up.
+        public static bool BookOpen()
+        {
+            try
+            {
+                AmmonomiconController book = AmmonomiconController.HasInstance ? AmmonomiconController.Instance : null;
+                return book != null && (book.IsOpen || book.IsOpening);
+            }
+            catch (System.Exception)
+            {
+                return false;
+            }
+        }
+
+        // The death page is showing (a game over - also when we were already a ghost before it).
+        public static bool DeathPageUp()
+        {
+            if (!BookOpen())
+                return false;
+            AmmonomiconDeathPageController page = Object.FindObjectOfType<AmmonomiconDeathPageController>();
+            return page != null && page.isActiveAndEnabled;
+        }
+
+        // Press the death screen's Quick Restart button (false if it isn't up).
+        public static bool PressQuickRestart()
+        {
+            AmmonomiconDeathPageController page = Object.FindObjectOfType<AmmonomiconDeathPageController>();
+            MethodInfo press = AccessTools.Method(typeof(AmmonomiconDeathPageController), "DoQuickRestart");
+            if (page == null || press == null)
+                return false;
+            press.Invoke(page, new object[] { null, null });
+            return true;
+        }
+
+        // The death screen's buttons give up silently while the game says a level is loading or the page is
+        // "busy". On the death screen nothing loads: online, a stale flag left by the death/ghost handling blocked
+        // every Quick Restart (clicked or pressed for the host). Clear them first.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AmmonomiconDeathPageController), "DoQuickRestart")]
+        private static void BeforeDeathPageQuickRestart(AmmonomiconDeathPageController __instance)
+        {
+            ClearStaleDeathFlags(__instance);
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AmmonomiconDeathPageController), "DoMainMenu")]
+        private static void BeforeDeathPageMainMenu(AmmonomiconDeathPageController __instance)
+        {
+            ClearStaleDeathFlags(__instance);
+        }
+
+        private static void ClearStaleDeathFlags(AmmonomiconDeathPageController page)
+        {
+            if (session == null || session.Status != NetSession.State.Connected || !GameManager.HasInstance)
+                return;
+            if (GameManager.Instance.IsLoadingLevel && loadingLevelField != null)
+            {
+                Plugin.Log.LogInfo("Death screen: clearing a stale 'level loading' flag.");
+                loadingLevelField.SetValue(GameManager.Instance, false);
+            }
+            if (page != null && doingSomethingField != null && (bool)doingSomethingField.GetValue(page))
+            {
+                Plugin.Log.LogInfo("Death screen: the page was stuck 'busy'; going ahead.");
+                doingSomethingField.SetValue(page, false);
+            }
+        }
+
+        public static void OnRestartRequest()
+        {
+            if (!GameManager.HasInstance)
+                return;
+            GameManager gm = GameManager.Instance;
+            string who = session.PeerName;
+            if (gm.IsFoyer || gm.IsLoadingLevel)
+                return;
+            if (OnDeathScreen)
+            {
+                AmmonomiconDeathPageController page = Object.FindObjectOfType<AmmonomiconDeathPageController>();
+                MethodInfo press = AccessTools.Method(typeof(AmmonomiconDeathPageController), "DoQuickRestart");
+                if (page != null && press != null)
+                {
+                    Plugin.Log.LogInfo(who + " pressed Quick Restart: restarting (we're on the death screen too).");
+                    press.Invoke(page, new object[] { null, null });
+                    return;
+                }
+            }
+            restartAskedUntil = Time.realtimeSinceStartup + 20f;
+            restartAskedBy = who;
+            Plugin.Log.LogInfo(who + " asks to restart the run.");
+            Toast.Show(who + " wants to restart the run - press " + Plugin.AcceptRestartKey.Value + " to Quick Restart.", 8f);
+        }
+
+        // The guest's waiting screen: what it says, and Esc to leave.
+        public static string WaitingText
+        {
+            get
+            {
+                string host = session != null && session.Players[0].Name.Length > 0 ? session.Players[0].Name : "the host";
+                return "Asked " + host + " to restart the run...\n(Esc: go to the Breach instead)";
+            }
+        }
         private static QuickRestartOptions pendingRestartOptions;
         private static bool restartingForHost;
 
@@ -66,6 +174,7 @@ namespace GungeonOnline
         private static string waitingCustom;   // the special floor our exit led to, if any
         private static float waitingToastAt;
         private static bool bypassWait;        // host gone: our own load goes ahead
+        private static readonly FieldInfo doingSomethingField = AccessTools.Field(typeof(AmmonomiconDeathPageController), "m_doingSomething");
         private static readonly FieldInfo loadingLevelField = AccessTools.Field(typeof(GameManager), "m_loadingLevel");
         private static readonly FieldInfo forceSeedUpdateField = AccessTools.Field(typeof(GameManager), "m_forceSeedUpdate");
 
@@ -107,10 +216,23 @@ namespace GungeonOnline
         // Joiner: the floor we're on (or loading), to skip loading the same floor twice.
         private static LevelInfo ourLevel;
 
+        // A loop starts the run over on the same seed but builds different floors: our current floor no longer
+        // counts as "the floor the host is loading", so its next load is followed.
+        public static void ForgetFloor()
+        {
+            ourLevel = null;
+        }
+
         // Joiner: the host is in a run right now (we know its floor).
         public static bool HostInRun
         {
             get { return hostLevel != null; }
+        }
+
+        // Joiner: the seed of the host's run (0 when the host isn't in one).
+        public static int HostRunSeed
+        {
+            get { return hostLevel != null ? hostLevel.Seed : 0; }
         }
 
         [HarmonyPrefix]
@@ -168,14 +290,23 @@ namespace GungeonOnline
             return IsConnected && !session.Link.IsHost;
         }
 
-        // The partner reports a player standing in the Breach.
+        // Joiner: the host reports a player standing in the Breach.
         private static bool PartnerInBreach
         {
-            get { return session.Remote.HasPlayer && session.Remote.Scene.StartsWith("tt_foyer"); }
+            get
+            {
+                RemotePlayerState host = session.Players[0];
+                return host.HasPlayer && host.Scene.StartsWith("tt_foyer");
+            }
+        }
+
+        private static string HostName
+        {
+            get { return session.Players[0].Name.Length > 0 ? session.Players[0].Name : "the host"; }
         }
 
         // We died for good and are looking at the death screen (not a ghost).
-        private static bool OnDeathScreen
+        public static bool OnDeathScreen
         {
             get
             {
@@ -315,9 +446,14 @@ namespace GungeonOnline
                 // The host hasn't started the new run yet: hold our restart until they do.
                 if (!WaitingToJoin)
                 {
-                    Plugin.Log.LogInfo("Quick Restart: waiting for the host to restart.");
+                    Plugin.Log.LogInfo("Quick Restart: asking the host to restart, waiting for them.");
                     WaitingForHost = true;
+                    session.SendReliable(MsgType.RestartRequest, null);
                     pendingRestartOptions = options;
+                    // The death screen's button already marked the game as loading. Held, nothing loads: un-mark
+                    // it, or our restart later sees "already loading", gives up, and leaves a black screen.
+                    if (loadingLevelField != null)
+                        loadingLevelField.SetValue(__instance, false);
                     return false;
                 }
             }
@@ -347,6 +483,9 @@ namespace GungeonOnline
             pendingEndRun = false;
             restartingForHost = true;
             Plugin.Log.LogInfo("Restarting onto the host's new run.");
+            // A restart quits when the game thinks a load is already running; only ours runs now.
+            if (loadingLevelField != null)
+                loadingLevelField.SetValue(gm, false);
             if (Pixelator.Instance != null)
                 Pixelator.Instance.FadeToBlack(LoadDelay, false, 0f);
             gm.DelayedQuickRestart(LoadDelay, pendingRestartOptions);
@@ -399,6 +538,22 @@ namespace GungeonOnline
 
         public static void Update()
         {
+            if (WaitingForHost && Input.GetKeyDown(KeyCode.Escape) && GameManager.HasInstance)
+            {
+                Plugin.Log.LogInfo("Stopped waiting for the host to restart: going to the Breach.");
+                WaitingForHost = false;
+                if (loadingLevelField != null)
+                    loadingLevelField.SetValue(GameManager.Instance, false);
+                GameManager.Instance.LoadCharacterSelect(true, false);
+            }
+            if (restartAskedUntil > 0f && Time.realtimeSinceStartup < restartAskedUntil && GameManager.HasInstance
+                && Input.GetKeyDown(Plugin.AcceptRestartKey.Value) && !GameManager.Instance.IsLoadingLevel && !GameManager.Instance.IsFoyer)
+            {
+                restartAskedUntil = -1f;
+                Plugin.Log.LogInfo("Restarting the run for " + restartAskedBy + ".");
+                GameManager.Instance.DelayedQuickRestart(0.25f, new QuickRestartOptions());
+            }
+
             UpdateExitWait();
             FollowToFoyerWhenReady();
         }
@@ -429,8 +584,8 @@ namespace GungeonOnline
             {
                 waitingToastAt = Time.realtimeSinceStartup + 5f;
                 Toast.Show(waitingForRunStart
-                    ? "Waiting for " + (session.PeerName ?? "the host") + " to start the run..."
-                    : "Waiting for " + (session.PeerName ?? "the host") + " to take the exit...", 6f);
+                    ? "Waiting for " + HostName + " to start the run..."
+                    : "Waiting for " + HostName + " to take the exit...", 6f);
             }
         }
 
@@ -599,11 +754,19 @@ namespace GungeonOnline
             ourLevel = null;
             if (!GameManager.HasInstance || GameManager.Instance.IsFoyer)
                 return;
-            if (OnDeathScreen && !WaitingForHost)
+            if (!WaitingForHost && (OnDeathScreen || DeathPageUp()))
             {
-                // Our own death screen decides: Return to Breach works as normal, Quick Restart goes to the Breach.
-                Plugin.Log.LogInfo("Host went back to the Breach; your death screen choice will take you there.");
-                return;
+                // Still on our death screen: the host chose the Breach, so everyone goes - press our own
+                // "Return to Breach" (it closes the book and ends the run the game's own way).
+                AmmonomiconDeathPageController page = Object.FindObjectOfType<AmmonomiconDeathPageController>();
+                MethodInfo toBreach = AccessTools.Method(typeof(AmmonomiconDeathPageController), "DoMainMenu");
+                if (page != null && toBreach != null)
+                {
+                    Plugin.Log.LogInfo("Host went back to the Breach: going there too from our death screen.");
+                    Toast.Show((session.Players[0].Name.Length > 0 ? session.Players[0].Name : "The host") + " went back to the Breach.", 4f);
+                    toBreach.Invoke(page, new object[] { null, null });
+                    return;
+                }
             }
             // (If we pressed Quick Restart and were waiting for the host, the host chose the Breach: go there.)
             WaitingForHost = false;

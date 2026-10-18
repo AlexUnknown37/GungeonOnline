@@ -5,36 +5,35 @@ using UnityEngine.SceneManagement;
 namespace GungeonOnline
 {
     // A simple on-screen window: pick a name, host or join over Steam or LAN, and check the connection.
-    // Also draws a name tag where the other player is standing.
+    // Also draws a name tag where each other player is standing.
     public class DebugWindow
     {
         public bool Visible = false; // backup/debug window; the real menu is MULTIPLAYER in the game menus
 
         private readonly NetSession session;
-        private readonly RemotePuppet puppet;
         private Rect windowRect = new Rect(20, 20, 320, 10);
         private string nameField;
         private string addressField;
         private string message = "";
 
-        public DebugWindow(NetSession session, RemotePuppet puppet)
+        public DebugWindow(NetSession session)
         {
             this.session = session;
-            this.puppet = puppet;
             nameField = Plugin.DisplayName();
             addressField = Plugin.LastLanAddress.Value;
         }
 
         public void Draw()
         {
-            DrawRemoteMarker();
+            foreach (RemotePlayerState p in session.Remotes)
+                DrawRemoteMarker(p);
             if (PauseSync.PartnerPaused)
             {
                 GUIStyle big = new GUIStyle(GUI.skin.label);
                 big.fontSize = 28;
                 big.alignment = TextAnchor.MiddleCenter;
                 big.normal.textColor = Color.white;
-                GUI.Label(new Rect(0f, Screen.height * 0.35f - 30f, Screen.width, 60f), session.PeerName + " paused the game", big);
+                GUI.Label(new Rect(0f, Screen.height * 0.35f - 30f, Screen.width, 60f), PauseSync.PausedBy + " paused the game", big);
             }
             if (LevelSync.WaitingForHost)
             {
@@ -42,7 +41,7 @@ namespace GungeonOnline
                 big.fontSize = 28;
                 big.alignment = TextAnchor.MiddleCenter;
                 big.normal.textColor = Color.white;
-                GUI.Label(new Rect(0f, Screen.height * 0.5f - 30f, Screen.width, 60f), "Waiting for the host to restart...", big);
+                GUI.Label(new Rect(0f, Screen.height * 0.5f - 40f, Screen.width, 80f), LevelSync.WaitingText, big);
             }
             if (Visible)
                 windowRect = GUILayout.Window(0x6E7601, windowRect, DrawContents, Plugin.Name + " " + Plugin.ModVersion);
@@ -77,9 +76,40 @@ namespace GungeonOnline
             GUILayout.EndHorizontal();
             if (nameField.Trim().Length == 0)
                 GUILayout.Label("(empty = your Steam name)");
-            bool names = GUILayout.Toggle(Plugin.ShowPartnerName.Value, " Show partner's name (only on your screen)");
+            bool takeBreak = GUILayout.Toggle(Autopilot.Active, " Take a Break (the bot plays for you until you move, " + Plugin.TakeABreakKey.Value + ")");
+            if (takeBreak != Autopilot.Active)
+                Autopilot.Toggle();
+            bool names = GUILayout.Toggle(Plugin.ShowPartnerName.Value, " Show other players' names (only on your screen)");
             if (names != Plugin.ShowPartnerName.Value)
                 Plugin.ShowPartnerName.Value = names;
+            // A host rule: guests see the host's choice.
+            if (session.Link != null && !session.Link.IsHost)
+            {
+                GUILayout.Label("Teleport to fights: " + (session.FightPull ? "ON" : "off") + " (host's choice)");
+                GUILayout.Label("Split money: " + (session.HalfMoney ? "ON" : "off") + " (host's choice)");
+                GUILayout.Label("Enemy health: x" + DifficultySync.Factor.ToString("0.##") + " (host's choice)");
+            }
+            else
+            {
+                bool fights = GUILayout.Toggle(Plugin.TeleportToFights.Value, " Teleport everyone into fights (when you host)");
+                if (fights != Plugin.TeleportToFights.Value)
+                {
+                    Plugin.TeleportToFights.Value = fights;
+                    session.SendRules();
+                }
+                bool scale = GUILayout.Toggle(Plugin.ScaleEnemyHealth.Value, " Tougher enemies with more players: +" + Mathf.RoundToInt(Plugin.HealthPerExtraPlayer.Value * 100f) + "% health each (when you host)");
+                if (scale != Plugin.ScaleEnemyHealth.Value)
+                {
+                    Plugin.ScaleEnemyHealth.Value = scale;
+                    session.SendRules();
+                }
+                bool split = GUILayout.Toggle(Plugin.HalfMoney.Value, " Split money: pickups count 1/players (when you host)");
+                if (split != Plugin.HalfMoney.Value)
+                {
+                    Plugin.HalfMoney.Value = split;
+                    session.SendRules();
+                }
+            }
         }
 
         private void DrawOfflineOptions()
@@ -131,31 +161,30 @@ namespace GungeonOnline
             Transport link = session.Link;
             GUILayout.Label("Mode: " + link.Kind + (link.IsHost ? " (host)" : ""));
             GUILayout.Label(link.Info);
-            GUILayout.Label("Status: " + session.Status);
-            if (session.PeerName.Length > 0)
-                GUILayout.Label("Partner: " + session.PeerName);
-            if (session.PingMs >= 0f)
-                GUILayout.Label("Ping: " + Mathf.RoundToInt(session.PingMs) + " ms");
+            GUILayout.Label("Status: " + session.Status + "  (you are player " + (session.LocalSlot + 1) + ")");
 
-            RemotePlayerState remote = session.Remote;
             if (session.Status == NetSession.State.Connected)
             {
-                if (remote.HasPlayer)
+                foreach (RemotePlayerState remote in session.Remotes)
                 {
-                    GUILayout.Label("Partner at " + remote.Position.ToString("F1") + " in " + remote.Scene);
-                    GUILayout.Label("Partner is " + (PlayableCharacters)remote.Identity + (remote.AltCostume ? " (alt costume)" : "")
-                        + ", anim " + remote.Clip + " #" + remote.Frame);
-                    GUILayout.Label("Partner sprite: " + puppet.Details());
-                    if (LevelSync.WaitingToJoin)
-                        GUILayout.Label("Host started a new run: Quick Restart to join it.");
-                    if (remote.IsDead)
-                        GUILayout.Label("PARTNER IS A GHOST: open a chest to bring them back!");
-                    PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
-                    if (me != null && me.IsGhost)
-                        GUILayout.Label("You are a ghost: your partner can bring you back by opening a chest.");
+                    GUILayout.Label("-- Player " + (remote.Slot + 1) + ": " + remote.Name
+                        + (remote.PingMs >= 0f ? "  (" + Mathf.RoundToInt(remote.PingMs) + " ms)" : ""));
+                    if (remote.HasPlayer)
+                    {
+                        GUILayout.Label((PlayableCharacters)remote.Identity + (remote.AltCostume ? " (alt costume)" : "")
+                            + " at " + remote.Position.ToString("F1") + " in " + remote.Scene);
+                        GUILayout.Label("Sprite: " + Plugin.Puppets[remote.Slot].Details());
+                        if (remote.IsDead)
+                            GUILayout.Label("A GHOST: open a chest to bring them back!");
+                    }
+                    else
+                        GUILayout.Label("In menus (" + remote.Scene + ")");
                 }
-                else
-                    GUILayout.Label("Partner is in menus (" + remote.Scene + ")");
+                if (LevelSync.WaitingToJoin)
+                    GUILayout.Label("Host started a new run: Quick Restart to join it.");
+                PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+                if (me != null && me.IsGhost)
+                    GUILayout.Label("You are a ghost: a living player can bring you back by opening a chest.");
             }
 
             if (session.Status == NetSession.State.Connected)
@@ -223,18 +252,19 @@ namespace GungeonOnline
             message = session.JoinLan(host) ? "" : "Couldn't start joining. See the log.";
         }
 
-        // Draws the partner's name over their position, if we're in the same level.
+        // Draws a player's name over their position, if we're in the same level.
         private GUIStyle nameStyle, nameShadow;
-        private string nameText, nameFor;
 
-        private void DrawRemoteMarker()
+        private void DrawRemoteMarker(RemotePlayerState remote)
         {
-            RemotePlayerState remote = session.Remote;
             if (session.Status != NetSession.State.Connected || !remote.HasPlayer)
                 return;
             if (remote.Scene != LevelSync.CurrentLevelKey())
                 return;
             if (!GameManager.HasInstance || GameManager.Instance.MainCameraController == null)
+                return;
+            // Not over the Ammonomicon (death page, item book) or the loop's time tube.
+            if (LevelSync.BookOpen() || LoopSync.TubePlaying)
                 return;
 
             Camera cam = GameManager.Instance.MainCameraController.Camera;
@@ -245,7 +275,7 @@ namespace GungeonOnline
                 return;
             // Above the drawn (smoothed) character; the network position runs ahead of it.
             Vector3 head;
-            if (!puppet.TryGetHeadTop(out head))
+            if (!Plugin.Puppets[remote.Slot].TryGetHeadTop(out head))
                 return;
             Vector3 screen = cam.WorldToScreenPoint(head);
             if (screen.z < 0f)
@@ -258,11 +288,7 @@ namespace GungeonOnline
                 nameShadow = new GUIStyle(nameStyle);
                 nameShadow.normal.textColor = new Color(0f, 0f, 0f, 0.85f);
             }
-            if (nameText == null || nameFor != session.PeerName)
-            {
-                nameFor = session.PeerName;
-                nameText = session.PeerName;
-            }
+            string nameText = remote.OnBreak ? remote.Name + " (bot)" : remote.Name;
             Rect r = new Rect(screen.x - 100f, Screen.height - screen.y - 26f, 200f, 24f);
             GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), nameText, nameShadow);
             GUI.Label(r, nameText, nameStyle);
