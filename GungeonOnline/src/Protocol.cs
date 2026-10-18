@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using UnityEngine;
 
 namespace GungeonOnline
 {
@@ -55,6 +56,9 @@ namespace GungeonOnline
         Roster = 47,      // host -> guests: who is in the game (slot + name of every player)
         RestartRequest = 48, // guest -> host: we pressed Quick Restart; please restart the run
         WalletState = 49, // host -> guests: the shared purse as it is (money, keys); guests set theirs to it
+        EnemyEffect = 54, // one of our bullets put a status effect (freeze, charm, fire...) on an enemy
+        Motion = 53,      // our flying bullets that started circling us or spiralling: the copies do the same
+        Companions = 52,  // our extra companions (after the first): kind, animation frame, facing, position
         LoopStart = 51,   // host -> guests: our loop's time tube just started (the loop number it leads to)
         AttackStart = 50, // an enemy in the room we lead started an attack: which one, at whom, from where, dice seed
         Progress = 28,   // host -> joiner: one part of the host's save progress (floors are built from it)
@@ -63,7 +67,7 @@ namespace GungeonOnline
     public static class Protocol
     {
         // Bump this whenever the packet format changes, so old and new versions refuse to talk.
-        public const int Version = 38;
+        public const int Version = 46;
         public const int Channel = 0;
         public const int MaxPlayers = 4;
         public const byte NoSlot = 255;   // a guest before the host has given it a slot
@@ -77,6 +81,43 @@ namespace GungeonOnline
         // a lot of garbage.
         private static readonly MemoryStream buildStream = new MemoryStream(1024);
         private static readonly BinaryWriter buildWriter = new BinaryWriter(buildStream);
+
+        // Positions and small offsets in half-pixel steps (1/32 tile) as 16-bit numbers: +-1000 tiles.
+        public static short Q(float v)
+        {
+            return (short)Mathf.Clamp(Mathf.RoundToInt(v * 32f), short.MinValue, short.MaxValue);
+        }
+
+        public static float DQ(short v)
+        {
+            return v / 32f;
+        }
+
+        public static void WriteQ(BinaryWriter w, Vector2 v)
+        {
+            w.Write(Q(v.x));
+            w.Write(Q(v.y));
+        }
+
+        public static Vector2 ReadQ(BinaryReader r)
+        {
+            return new Vector2(DQ(r.ReadInt16()), DQ(r.ReadInt16()));
+        }
+
+        // A short code for a text that's the same in every game (string.GetHashCode isn't promised to be).
+        public static int Hash(string text)
+        {
+            unchecked
+            {
+                int h = (int)2166136261;
+                if (text != null)
+                {
+                    foreach (char c in text)
+                        h = (h ^ c) * 16777619;
+                }
+                return h;
+            }
+        }
 
         public static byte[] Build(MsgType type, Action<BinaryWriter> writeBody)
         {

@@ -272,9 +272,39 @@ namespace GungeonOnline
                         }
                         move = PathToward(me, goal);
                     }
+                    else
+                    {
+                        // Nothing left to explore and the boss isn't beaten: go to the boss. Rooms we gave up on get
+                        // another try now and then (a door may have opened since).
+                        RoomHandler boss = BossRoom();
+                        if (boss != null && me.CurrentRoom != boss)
+                        {
+                            IntVector2 c = boss.GetCenterCell();
+                            move = PathToward(me, new Vector2(c.x + 0.5f, c.y + 0.5f));
+                        }
+                        if (now - lastRetryAt > 30f)
+                        {
+                            lastRetryAt = now;
+                            explored.RemoveWhere(delegate (RoomHandler r) { return r != null && !r.hasEverBeenVisited; });
+                        }
+                    }
                 }
                 if (move.sqrMagnitude > 0.01f)
                     me.forceAimPoint = pos + move * 4f;
+            }
+
+            // Walking into a table (or a crate...) that blocks the way, with nothing to fight: shoot it to pieces.
+            if (target == null && !me.IsGhost && blocker != null && now - blockedAt < 0.6f)
+            {
+                BraveBehaviour b = blocker as BraveBehaviour;
+                Vector2 at = b != null && b.specRigidbody != null ? b.specRigidbody.UnitCenter : (Vector2)blocker.transform.position;
+                me.forceAimPoint = at;
+                shoot = true;
+                if (now >= nextBlockerLogAt)
+                {
+                    nextBlockerLogAt = now + 5f;
+                    Plugin.Log.LogInfo("Bot" + (PlayerIndex == 0 ? "" : " (" + Label + ")") + ": " + blocker.name + " is in the way; shooting it.");
+                }
             }
 
             Vector2 wanted = move;
@@ -314,6 +344,8 @@ namespace GungeonOnline
         }
 
         private float nextStatusAt;
+        private Component blocker;
+        private float blockedAt, nextBlockerLogAt;
         private Vector2 smoothMove;
         private float nextPathLogAt;
 
@@ -466,6 +498,22 @@ namespace GungeonOnline
                     return true;
             }
             return false;
+        }
+
+        private float lastRetryAt;
+
+        // This floor's boss room, if any.
+        private static RoomHandler BossRoom()
+        {
+            Dungeon dungeon = GameManager.Instance.Dungeon;
+            if (dungeon == null || dungeon.data == null)
+                return null;
+            foreach (RoomHandler room in dungeon.data.rooms)
+            {
+                if (room != null && room.area != null && room.area.PrototypeRoomCategory == PrototypeDungeonRoom.RoomCategory.BOSS)
+                    return room;
+            }
+            return null;
         }
 
         // Where the exit elevator is, once this floor's boss is beaten (its room open and empty).
@@ -652,7 +700,9 @@ namespace GungeonOnline
         }
 
         // Use the best gun that still has ammo (better quality first; starting guns with endless ammo last).
+        // Test copies can switch on a gun tour instead: every gun in turn for 15 seconds, refilled.
         private float nextGunPickAt;
+        private int tourIndex;
         private void PickGun(PlayerController me, float now)
         {
             if (now < nextGunPickAt || me.inventory == null || me.IsGhost)
@@ -662,6 +712,19 @@ namespace GungeonOnline
             if (current != null && current.IsReloading)
                 return;
             List<Gun> guns = me.inventory.AllGuns;
+            if (Autopilot.GunTour && guns.Count > 1)
+            {
+                nextGunPickAt = now + 15f;
+                tourIndex = (tourIndex + 1) % guns.Count;
+                Gun next = guns[tourIndex];
+                if (next != null)
+                {
+                    next.ammo = next.AdjustedMaxAmmo;
+                    Plugin.Log.LogInfo("Bot" + (PlayerIndex == 0 ? "" : " (" + Label + ")") + ": gun tour - " + next.EncounterNameOrDisplayName + ".");
+                    me.ChangeToGunSlot(tourIndex, false);
+                }
+                return;
+            }
             int best = -1;
             int bestScore = int.MinValue;
             for (int i = 0; i < guns.Count; i++)
@@ -1005,6 +1068,18 @@ namespace GungeonOnline
                 // Bullets aren't walls (dodging handles them): treating them as walls froze the bot in a hail of them.
                 if (blocked && hit != null && hit.OtherRigidbody != null && hit.OtherRigidbody.GetComponent<Projectile>() != null)
                     blocked = false;
+                // A table or something else that breaks in the way: remember it, Think shoots it out of the way.
+                if (blocked && hit != null && hit.OtherRigidbody != null)
+                {
+                    Component breakable = hit.OtherRigidbody.GetComponentInParent<FlippableCover>();
+                    if (breakable == null)
+                        breakable = hit.OtherRigidbody.GetComponentInParent<MajorBreakable>();
+                    if (breakable != null)
+                    {
+                        blocker = breakable;
+                        blockedAt = Time.realtimeSinceStartup;
+                    }
+                }
                 wall = blocked && (hit == null || hit.OtherRigidbody == null);
                 if (blocked && forced && Time.realtimeSinceStartup >= nextBumpLogAt)
                 {
@@ -1171,6 +1246,8 @@ namespace GungeonOnline
         {
             get { return Self.Active; }
         }
+
+        public static bool GunTour; // test copies: rotate through every gun (TestLoadout)
 
         public static bool Explore
         {

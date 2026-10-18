@@ -118,13 +118,49 @@ namespace GungeonOnline
                 SendBreak(Kind.Table, __instance.gameObject, info.Home, Vector2.zero);
         }
 
+        // What broke here lately (by anything, including copies of other players' bullets): when another player's
+        // report of the same break arrives, it's already done - no search, no warning.
+        private struct RecentBreak
+        {
+            public string Name;
+            public Vector2 Pos;
+            public float At;
+        }
+        private static readonly List<RecentBreak> recentBreaks = new List<RecentBreak>();
+
+        private static void RememberBreak(string name, Vector2 pos)
+        {
+            float now = Time.realtimeSinceStartup;
+            recentBreaks.RemoveAll(delegate (RecentBreak b) { return now - b.At > 10f; });
+            if (recentBreaks.Count > 300)
+                recentBreaks.RemoveAt(0);
+            RecentBreak r = new RecentBreak();
+            r.Name = name;
+            r.Pos = pos;
+            r.At = now;
+            recentBreaks.Add(r);
+        }
+
+        private static bool BrokeHereLately(string name, Vector2 pos)
+        {
+            float now = Time.realtimeSinceStartup;
+            foreach (RecentBreak b in recentBreaks)
+            {
+                if (now - b.At < 10f && b.Name == name && Vector2.Distance(b.Pos, pos) < 0.75f)
+                    return true;
+            }
+            return false;
+        }
+
         private static void SendBreak(Kind kind, GameObject go, Vector2 pos, Vector2 direction)
         {
-            if (applyingRemote || !Connected)
+            if (!Connected)
                 return;
-            string level = LevelSync.CurrentLevelKey();
             string name = BaseName(go);
-            Plugin.Log.LogInfo("Broke " + kind + " '" + name + "' at " + pos + "; telling partner.");
+            RememberBreak(name, pos);
+            if (applyingRemote || BulletSync.RemoteBulletColliding || EnemySync.RemoteBulletHitting)
+                return; // broken by a copy of another player's bullet: their game reports it
+            string level = LevelSync.CurrentLevelKey();
             session.SendReliable(MsgType.Break, delegate (BinaryWriter w)
             {
                 w.Write(level);
@@ -148,7 +184,11 @@ namespace GungeonOnline
             applyingRemote = true;
             try
             {
-                if (kind == Kind.Minor)
+                if (kind != Kind.Table && BrokeHereLately(name, pos))
+                {
+                    // Broken here already (usually by the copy of the same bullet).
+                }
+                else if (kind == Kind.Minor)
                 {
                     MinorBreakable m = Nearest<MinorBreakable>(name, pos, delegate (MinorBreakable b) { return !b.IsBroken; });
                     if (m != null)

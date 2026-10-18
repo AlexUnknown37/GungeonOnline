@@ -26,8 +26,29 @@ namespace GungeonOnline
             float additionalTimeAtMaxRadius, PlayerController user, bool breaksWalls, bool skipBreakables)
         {
             if (triggeringRemote || session == null || session.Status != NetSession.State.Connected || user == null
-                || !GameManager.HasInstance || user != GameManager.Instance.PrimaryPlayer)
+                || !GameManager.HasInstance)
                 return;
+            // Ours, or (host) the stand-in bot's, sent as the player it plays for.
+            bool standIn = StandIn.Active && user == StandIn.Player;
+            if (user != GameManager.Instance.PrimaryPlayer && !standIn)
+                return;
+            if (standIn)
+                Protocol.SendAs = StandIn.Slot;
+            try
+            {
+                SendBlank(centerPoint, expandSpeed, maxRadius, silencerVFX, distIntensity, distRadius, pushForce, pushRadius,
+                    knockbackForce, knockbackRadius, additionalTimeAtMaxRadius, breaksWalls, skipBreakables);
+            }
+            finally
+            {
+                Protocol.SendAs = -1;
+            }
+        }
+
+        private static void SendBlank(Vector2 centerPoint, float expandSpeed, float maxRadius, GameObject silencerVFX,
+            float distIntensity, float distRadius, float pushForce, float pushRadius, float knockbackForce, float knockbackRadius,
+            float additionalTimeAtMaxRadius, bool breaksWalls, bool skipBreakables)
+        {
             bool ghostVfx = silencerVFX != null && silencerVFX.name.Contains("Ghost");
             bool anyVfx = silencerVFX != null;
             string level = LevelSync.CurrentLevelKey();

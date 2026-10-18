@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.102.0";
+        public const string ModVersion = "0.115.0";
 
         public static ManualLogSource Log;
 
@@ -71,8 +71,9 @@ namespace GungeonOnline
                 "When you host: when a player walks into a fight (the room locks), everyone else is teleported there. " +
                 "Joiners follow the host's setting.");
             HalfMoney = Config.Bind("Rules", "HalfMoney", true,
-                "When you host: money pickups count half online. The purse is shared and both games drop money, " +
-                "so this keeps a run's income close to solo. Joiners follow the host's setting.");
+                "When you host: a boss's money counts 1/players online. The purse is shared and a boss drops money in every " +
+                "player's game, so this keeps a run's income close to solo. Enemies' money always counts in full. " +
+                "Joiners follow the host's setting.");
 
             string[] args = Environment.GetCommandLineArgs();
             for (int i = 0; i < args.Length - 1; i++)
@@ -104,6 +105,9 @@ namespace GungeonOnline
             DeathSync.Init(session, harmony);
             EnemySync.Init(session, harmony);
             AttackSync.Init(session, harmony);
+            CompanionSync.Init(session);
+            GenerationSeed.Init(session, harmony);
+            EffectSync.Init(session, harmony);
             ThrowSync.Init(session, harmony);
             BlankSync.Init(session, harmony);
             MenuButtons.Init(harmony);
@@ -245,6 +249,12 @@ namespace GungeonOnline
                 Log.LogInfo("Test: dying.");
                 me.healthHaver.Armor = 0f;
                 me.healthHaver.ApplyDamage(10000f, Vector2.zero, "Test", CoreDamageTypes.None, DamageCategory.Unstoppable, true, null, true);
+                return;
+            }
+            // I: a test loadout of items, companions, orbitals and guns for this player, then a gun tour.
+            if (Input.GetKeyDown(KeyCode.I) && !GameManager.Instance.IsFoyer && !me.IsGhost)
+            {
+                TestLoadout.Give(me, session.LocalSlot);
                 return;
             }
             // R: press Quick Restart on the death screen (as a player clicking it).
@@ -428,6 +438,10 @@ namespace GungeonOnline
             { long __m = AllocProfiler.Begin(); WorldSync.Update(); AllocProfiler.End("WorldSync.Update", __m); }
             { long __m = AllocProfiler.Begin(); EnemySync.Update(); AllocProfiler.End("EnemySync.Update", __m); }
             AttackSync.Update();
+            CompanionSync.Update();
+            NetStats.Update(session.Status == NetSession.State.Connected);
+            if (testMode)
+                TestLoadout.Update();
             { long __m = AllocProfiler.Begin(); TargetSync.Update(); AllocProfiler.End("TargetSync.Update", __m); }
             { long __m = AllocProfiler.Begin(); PlayerWarp.Update(); AllocProfiler.End("PlayerWarp.Update", __m); }
             {

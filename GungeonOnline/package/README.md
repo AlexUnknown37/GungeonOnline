@@ -15,14 +15,17 @@ It can do this so far (all experimental):
 
 **Shared world**
 - Enemies: shared health and deaths; the game in charge of a room decides each enemy's attacks and movement, so everyone sees the same fight
-- Bullets, thrown items, blanks, floor effects, tables, breakables and rolling barrels
+- Status effects on enemies (freeze, charm, fire, poison, slow, bleed) happen in every game
+- Bullets look the same for everyone, items and synergies included: tints, size, bounces, piercing, chain lightning, orbiting and spiral bullets, gun muzzle and reload effects
+- Companions (all of them) and orbitals (Guon stones...) show for everyone
+- Same room decorations in every game; bullets, thrown items, blanks, floor effects, tables, breakables and rolling barrels
 - Shared money, keys and pause; optional PvP and split money
 - Teleport to fights: when someone starts a fight, everyone else is pulled in (on by default)
 - Tougher enemies with more players (+50% health per extra player by default; stacks with Loop The Gungeon)
 
 **Deaths and drop-outs**
 - Co-op deaths: become a ghost, get revived from a chest or with the Cultist's Friendship Cookie
-- A player who drops out keeps playing as a bot with their gear; when they rejoin, their character is handed back
+- A player who drops out keeps playing as a bot with their gear; when they rejoin, their character is handed back. Only **one** bot at a time: the host's game has room for one extra character, so if several players drop out, only the first gets a bot
 - Take a Break: a bot plays for you until you touch the controls again
 
 **Other mods**
@@ -65,7 +68,7 @@ In `BepInEx/config/gungeononline.multiplayer.cfg` (or your mod manager's config 
 - `ToggleWindowKey`, `TakeABreakKey`, `AcceptRestartKey`: the keys above
 - `Port` (LAN): the UDP port for LAN games (default 27460; host and friends must match)
 - `PvP`: players' bullets hurt each other (default off)
-- `HalfMoney`: split money; each pickup counts 1/players (default on)
+- `HalfMoney`: split boss money; a boss's money counts 1/players, since it drops in every game (default on). Enemies' money always counts in full
 - `TeleportToFights`: pull everyone into a fight someone starts (default on)
 - `ScaleEnemyHealth`, `HealthPerExtraPlayer`: tougher enemies with more players (default on, +50% each)
 - `ShowPartnerName`, `ShowPartyList`: name tags and the party list (default on)

@@ -251,6 +251,20 @@ namespace GungeonOnline
         private static bool cachedHadDungeon;
         private static string cachedKey = "";
 
+        // The current level as a short code (the same in every game), for frequent messages instead of the name.
+        public static int CurrentLevelCode()
+        {
+            string key = CurrentLevelKey();
+            if (key != lastCodeKey)
+            {
+                lastCodeKey = key;
+                lastCode = Protocol.Hash(key);
+            }
+            return lastCode;
+        }
+        private static string lastCodeKey;
+        private static int lastCode;
+
         public static string CurrentLevelKey()
         {
             UnityEngine.SceneManagement.Scene scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();

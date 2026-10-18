@@ -3,9 +3,9 @@ using UnityEngine;
 
 namespace GungeonOnline
 {
-    // Draws the partner's companion (e.g. the Hunter's dog): a sprite-only copy showing exactly the
-    // animation frame the partner's game reports, gliding smoothly like the partner does.
-    // It's only a picture for now: it doesn't fight, and it can't be petted yet.
+    // Draws another player's companion (e.g. the Hunter's dog): a sprite-only copy showing exactly the
+    // animation frame their game reports, gliding smoothly. Only a picture: the real companion fights in its
+    // owner's game (its bullets are copied by BulletSync); petting goes through PetSync.
     public class PetPuppet
     {
         private tk2dBaseSprite sprite;
@@ -29,26 +29,32 @@ namespace GungeonOnline
 
         public void Update(RemotePlayerState remote, bool partnerShown)
         {
-            if (!partnerShown || !remote.HasPet || !GameManager.HasInstance || GameManager.Instance.PrimaryPlayer == null)
+            Vector2 feet = remote.PetMotion.HasData ? remote.PetMotion.Sample() : remote.PetFeet;
+            Show(partnerShown && remote.HasPet, remote.PetGuid, remote.PetClip, remote.PetFrame, remote.PetFlipX, feet);
+        }
+
+        // Draw any companion: which one (enemy guid), its animation frame, facing and feet position.
+        public void Show(bool visible, string guid, string clip, int frame, bool flipX, Vector2 feet)
+        {
+            if (!visible || string.IsNullOrEmpty(guid) || !GameManager.HasInstance || GameManager.Instance.PrimaryPlayer == null)
             {
                 Hide();
                 return;
             }
 
             // Scene loads destroy the copy (sprite == null), so it gets rebuilt as needed.
-            if (sprite == null || remote.PetGuid != builtGuid)
+            if (sprite == null || guid != builtGuid)
             {
-                if (!Build(remote.PetGuid))
+                if (!Build(guid))
                     return;
             }
 
             if (!sprite.gameObject.activeSelf)
                 sprite.gameObject.SetActive(true);
-            ShowFrame(remote.PetClip, remote.PetFrame);
-            sprite.FlipX = remote.PetFlipX;
+            ShowFrame(clip, frame);
+            sprite.FlipX = flipX;
             RemotePuppet.ApplySheet(sprite, ref material, ref texture);
 
-            Vector2 feet = remote.PetMotion.HasData ? remote.PetMotion.Sample() : remote.PetFeet;
             Vector2 offset = feet - sprite.WorldBottomCenter;
             sprite.transform.position += new Vector3(offset.x, offset.y, 0f);
             sprite.UpdateZDepth();

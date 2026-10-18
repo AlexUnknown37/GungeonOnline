@@ -39,6 +39,7 @@ namespace GungeonOnline
         public float Health;          // hearts (1 = one heart), for the party list
         public float MaxHealth;
         public float Armor;
+        public int Blanks;            // blanks they carry
         public PlayerLook Look = new PlayerLook(); // ghost glow, status tints, on fire
         public Vector2 RootOffset;    // their player transform minus their feet (for warping to them)
 
@@ -193,8 +194,8 @@ namespace GungeonOnline
             }
         }
 
-        // Lobby rule set by the host: money pickups count half while online (the purse is shared and both
-        // games drop money for the same kills, so full value would earn about twice a solo run).
+        // Lobby rule set by the host: a boss's money counts 1/players while online (the purse is shared and the
+        // boss drops money in every game). See LootSync.
         private bool joinerHalfMoney = true;
         public bool HalfMoney
         {
@@ -440,6 +441,7 @@ namespace GungeonOnline
                 case MsgType.Shot:
                 case MsgType.EnemyStates:
                 case MsgType.Orbitals:
+                case MsgType.Companions:
                 case MsgType.Courses:
                 case MsgType.Beams:
                 case MsgType.Reload:
@@ -456,6 +458,7 @@ namespace GungeonOnline
             float arrived = Time.realtimeSinceStartup;
             lastReceivedAt = arrived;
             MsgType type = (MsgType)data[offset];
+            NetStats.Received(type, length);
             int from;
             if (Link.IsHost)
             {
@@ -472,7 +475,10 @@ namespace GungeonOnline
                     for (int i = 1; i < Players.Length; i++)
                     {
                         if (i != from && Players[i].Connected)
+                        {
+                            NetStats.Sent(type, copy.Length, 1);
                             Link.Send(i, copy, reliable);
+                        }
                     }
                 }
                 else if (!Players[from].Connected && type != MsgType.Hello)
@@ -738,6 +744,15 @@ namespace GungeonOnline
                         LootSync.OnWallet(r);
                         break;
 
+                    case MsgType.Companions:
+                        CompanionSync.OnCompanions(r);
+                        break;
+                    case MsgType.Motion:
+                        BulletSync.OnMotion(r);
+                        break;
+                    case MsgType.EnemyEffect:
+                        EffectSync.OnEnemyEffect(r);
+                        break;
                     case MsgType.LoopStart:
                         if (!Link.IsHost)
                             LoopSync.OnLoopStart(r);
@@ -825,21 +840,28 @@ namespace GungeonOnline
         public void SendUnreliable(MsgType type, Action<BinaryWriter> writeBody)
         {
             if (Status == State.Connected && Link != null)
-                Link.Send(onlyTo, Protocol.Build(type, writeBody), false);
+                Link.Send(onlyTo, Counted(type, Protocol.Build(type, writeBody), onlyTo), false);
+        }
+
+        // Count a message for NetStats: sent once to one player, or to each other player.
+        private byte[] Counted(MsgType type, byte[] packet, int to)
+        {
+            NetStats.Sent(type, packet.Length, to == Transport.Everyone ? Math.Max(1, Link.IsHost ? Remotes.Count : 1) : 1);
+            return packet;
         }
 
         // For game events (level loads etc.) that must arrive. Ignored unless connected.
         public void SendReliable(MsgType type, Action<BinaryWriter> writeBody)
         {
             if (Status == State.Connected && Link != null)
-                Link.Send(onlyTo, Protocol.Build(type, writeBody), true);
+                Link.Send(onlyTo, Counted(type, Protocol.Build(type, writeBody), onlyTo), true);
         }
 
         // Host: to one guest only (e.g. answering that guest). A guest can only reach the host.
         public void SendReliableTo(int slot, MsgType type, Action<BinaryWriter> writeBody)
         {
             if (Status == State.Connected && Link != null)
-                Link.Send(Link.IsHost ? slot : 0, Protocol.Build(type, writeBody), true);
+                Link.Send(Link.IsHost ? slot : 0, Counted(type, Protocol.Build(type, writeBody), slot), true);
         }
 
         // Guest: hello to the host. Host: hello back to one guest, telling it its slot.
@@ -1036,63 +1058,109 @@ namespace GungeonOnline
             bool onBreak = onBreakNow;
             HealthHaver hh = hasPlayer ? player.healthHaver : null;
             float health = hh != null ? hh.GetCurrentHealth() : 0f;
+            int blanks = hasPlayer ? Mathf.Clamp(player.Blanks, 0, 255) : 0;
             float maxHealth = hh != null ? hh.GetMaxHealth() : 0f;
             float armor = hh != null ? hh.Armor : 0f;
             float now = Time.realtimeSinceStartup;
 
-            Link.Send(Protocol.Build(MsgType.PlayerState, delegate (BinaryWriter w)
+            // Compact: what rarely changes (level, character, health, looks, shadow, companion kind) only when it
+            // changed or once a second; animation names when they change or twice a second; positions as
+            // half-pixel steps. The level's short code goes every time, so a level change is never missed.
+            int cacheSlot = Mathf.Clamp(Protocol.SendAs >= 0 ? Protocol.SendAs : Protocol.LocalSlot, 0, Protocol.MaxPlayers - 1);
+            SentState cache = sentStates[cacheSlot];
+            string slowKey = scene + "|" + identity + "|" + altCostume + "|" + customCharacter + "|" + health + "|" + maxHealth + "|" + armor + "|" + blanks
+                + "|" + look.SpecialFlags + "|" + look.FlatColor + "|" + look.OverrideColor + "|" + look.OnFire + "|" + Protocol.Q(rootOffset.x)
+                + "," + Protocol.Q(rootOffset.y) + "|" + hasShadow + "|" + shadowOffset + "|" + petGuid;
+            bool slow = slowKey != cache.SlowKey || now - cache.SlowAt > 1f;
+            bool clips = clip != cache.Clip || petClip != cache.PetClip || now - cache.ClipAt > 0.5f;
+            if (slow)
+            {
+                cache.SlowKey = slowKey;
+                cache.SlowAt = now;
+            }
+            if (clips)
+            {
+                cache.Clip = clip;
+                cache.PetClip = petClip;
+                cache.ClipAt = now;
+            }
+            byte flags = (byte)((hasPlayer ? 1 : 0) | (slow ? 2 : 0) | (clips ? 4 : 0) | (visible ? 8 : 0) | (flip ? 16 : 0)
+                | (isDead ? 32 : 0) | (onBreak ? 64 : 0) | (hasPet ? 128 : 0));
+            int sceneCode = Protocol.Hash(scene);
+
+            Link.Send(Counted(MsgType.PlayerState, Protocol.Build(MsgType.PlayerState, delegate (BinaryWriter w)
             {
                 w.Write(now);
-                w.Write(hasPlayer);
-                w.Write(scene);
-                w.Write(pos.x); w.Write(pos.y);
-                w.Write(aim.x); w.Write(aim.y);
-                w.Write(identity);
-                w.Write(altCostume);
-                w.Write(customCharacter);
-                w.Write(visible);
-                w.Write(clip);
+                w.Write(flags);
+                w.Write(sceneCode);
+                Protocol.WriteQ(w, pos);
+                Protocol.WriteQ(w, aim);
+                Protocol.WriteQ(w, feet);
                 w.Write((byte)Mathf.Clamp(frame, 0, 255));
-                w.Write(flip);
-                w.Write(feet.x); w.Write(feet.y);
-                w.Write(rootOffset.x); w.Write(rootOffset.y);
-                w.Write(isDead);
-                w.Write(onBreak);
-                w.Write(health); w.Write(maxHealth); w.Write(armor);
-                w.Write(look.SpecialFlags.x); w.Write(look.SpecialFlags.y); w.Write(look.SpecialFlags.z); w.Write(look.SpecialFlags.w);
-                WriteColor(w, look.FlatColor);
-                WriteColor(w, look.OverrideColor);
-                w.Write(look.OnFire);
-                w.Write(hasGun);
+                if (slow)
+                {
+                    w.Write(scene);
+                    w.Write(identity);
+                    w.Write(altCostume);
+                    w.Write(customCharacter);
+                    w.Write(health); w.Write(maxHealth); w.Write(armor);
+                    w.Write((byte)blanks);
+                    w.Write(look.SpecialFlags.x); w.Write(look.SpecialFlags.y); w.Write(look.SpecialFlags.z); w.Write(look.SpecialFlags.w);
+                    WriteColor(w, look.FlatColor);
+                    WriteColor(w, look.OverrideColor);
+                    w.Write(look.OnFire);
+                    Protocol.WriteQ(w, rootOffset);
+                    w.Write(hasShadow);
+                    if (hasShadow)
+                    {
+                        w.Write(shadowOffset.x); w.Write(shadowOffset.y); w.Write(shadowOffset.z);
+                    }
+                    w.Write(petGuid);
+                }
+                if (clips)
+                {
+                    w.Write(clip);
+                    w.Write(petClip);
+                }
+                w.Write((byte)((hasGun ? 1 : 0) | (gunFlipY ? 2 : 0)));
                 if (hasGun)
                 {
                     w.Write(gunId);
-                    w.Write(gunSpriteId);
-                    w.Write(gunOffset.x); w.Write(gunOffset.y);
-                    w.Write(gunAngle);
-                    w.Write(gunFlipY);
-                    w.Write(gunHeight);
+                    w.Write((ushort)Mathf.Clamp(gunSpriteId, 0, 65535));
+                    Protocol.WriteQ(w, gunOffset);
+                    w.Write((short)Mathf.RoundToInt(Mathf.Repeat(gunAngle, 360f) * 10f));
+                    w.Write(Protocol.Q(gunHeight));
                 }
-                w.Write(hasShadow);
-                if (hasShadow)
-                {
-                    w.Write(shadowOffset.x); w.Write(shadowOffset.y); w.Write(shadowOffset.z);
-                }
-                w.Write(hasPet);
                 if (hasPet)
                 {
-                    w.Write(petGuid);
-                    w.Write(petClip);
                     w.Write((byte)Mathf.Clamp(petFrame, 0, 255));
                     w.Write(petFlip);
-                    w.Write(petFeet.x); w.Write(petFeet.y);
+                    Protocol.WriteQ(w, petFeet);
                 }
-            }), false);
+            }), Transport.Everyone), false);
         }
 
         private static void WriteColor(BinaryWriter w, Color c)
         {
             w.Write(c.r); w.Write(c.g); w.Write(c.b); w.Write(c.a);
+        }
+
+        // What we last sent of each player we speak for (us, or the host's stand-in): see SendPlayerStateOf.
+        private class SentState
+        {
+            public string SlowKey = "";
+            public float SlowAt = -100f;
+            public string Clip = "", PetClip = "";
+            public float ClipAt = -100f;
+        }
+        private readonly SentState[] sentStates = NewSentStates();
+
+        private static SentState[] NewSentStates()
+        {
+            SentState[] s = new SentState[Protocol.MaxPlayers];
+            for (int i = 0; i < s.Length; i++)
+                s[i] = new SentState();
+            return s;
         }
 
         private static Color ReadColor(BinaryReader r)
@@ -1103,56 +1171,75 @@ namespace GungeonOnline
         private void ReadPlayerState(BinaryReader r, RemotePlayerState Remote)
         {
             float sentAt = r.ReadSingle();
-            bool hasPlayer = r.ReadBoolean();
-            string scene = r.ReadString();
-            Vector2 center = new Vector2(r.ReadSingle(), r.ReadSingle());
-            Vector2 aim = new Vector2(r.ReadSingle(), r.ReadSingle());
-            int identity = r.ReadInt32();
-            bool altCostume = r.ReadBoolean();
-            string customCharacter = r.ReadString();
-            bool visible = r.ReadBoolean();
-            string clip = r.ReadString();
+            byte flags = r.ReadByte();
+            int sceneCode = r.ReadInt32();
+            bool hasPlayer = (flags & 1) != 0, slow = (flags & 2) != 0, clips = (flags & 4) != 0, visible = (flags & 8) != 0;
+            bool flipX = (flags & 16) != 0, isDead = (flags & 32) != 0, onBreak = (flags & 64) != 0, hasPet = (flags & 128) != 0;
+            Vector2 center = Protocol.ReadQ(r);
+            Vector2 aim = Protocol.ReadQ(r);
+            Vector2 feet = Protocol.ReadQ(r);
             int frame = r.ReadByte();
-            bool flipX = r.ReadBoolean();
-            Vector2 feet = new Vector2(r.ReadSingle(), r.ReadSingle());
-            Vector2 rootOffset = new Vector2(r.ReadSingle(), r.ReadSingle());
-            bool isDead = r.ReadBoolean();
-            bool onBreak = r.ReadBoolean();
-            float health = r.ReadSingle(), maxHealth = r.ReadSingle(), armor = r.ReadSingle();
-            PlayerLook look = new PlayerLook();
-            look.SpecialFlags = new Vector4(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-            look.FlatColor = ReadColor(r);
-            look.OverrideColor = ReadColor(r);
-            look.OnFire = r.ReadBoolean();
-            bool hasGun = r.ReadBoolean();
+            // What wasn't sent this time is what we already have.
+            string scene = Remote.Scene;
+            int identity = Remote.Identity;
+            bool altCostume = Remote.AltCostume;
+            string customCharacter = Remote.CustomCharacter;
+            float health = Remote.Health, maxHealth = Remote.MaxHealth, armor = Remote.Armor;
+            int blanks = Remote.Blanks;
+            PlayerLook look = Remote.Look;
+            Vector2 rootOffset = Remote.RootOffset;
+            bool hasShadow = Remote.HasShadow;
+            Vector3 shadowOffset = Remote.ShadowOffset;
+            string petGuid = Remote.PetGuid;
+            string clip = Remote.Clip, petClip = Remote.PetClip;
+            if (slow)
+            {
+                scene = r.ReadString();
+                identity = r.ReadInt32();
+                altCostume = r.ReadBoolean();
+                customCharacter = r.ReadString();
+                health = r.ReadSingle(); maxHealth = r.ReadSingle(); armor = r.ReadSingle();
+                blanks = r.ReadByte();
+                look = new PlayerLook();
+                look.SpecialFlags = new Vector4(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                look.FlatColor = ReadColor(r);
+                look.OverrideColor = ReadColor(r);
+                look.OnFire = r.ReadBoolean();
+                rootOffset = Protocol.ReadQ(r);
+                hasShadow = r.ReadBoolean();
+                shadowOffset = hasShadow ? new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()) : Vector3.zero;
+                petGuid = r.ReadString();
+            }
+            if (clips)
+            {
+                clip = r.ReadString();
+                petClip = r.ReadString();
+            }
+            byte gunFlags = r.ReadByte();
+            bool hasGun = (gunFlags & 1) != 0, gunFlipY = (gunFlags & 2) != 0;
             int gunId = -1, gunSpriteId = 0;
             Vector2 gunOffset = Vector2.zero;
             float gunAngle = 0f, gunHeight = 0f;
-            bool gunFlipY = false;
             if (hasGun)
             {
                 gunId = r.ReadInt32();
-                gunSpriteId = r.ReadInt32();
-                gunOffset = new Vector2(r.ReadSingle(), r.ReadSingle());
-                gunAngle = r.ReadSingle();
-                gunFlipY = r.ReadBoolean();
-                gunHeight = r.ReadSingle();
+                gunSpriteId = r.ReadUInt16();
+                gunOffset = Protocol.ReadQ(r);
+                gunAngle = r.ReadInt16() / 10f;
+                gunHeight = Protocol.DQ(r.ReadInt16());
             }
-            bool hasShadow = r.ReadBoolean();
-            Vector3 shadowOffset = hasShadow ? new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()) : Vector3.zero;
-            bool hasPet = r.ReadBoolean();
-            string petGuid = "", petClip = "";
             int petFrame = 0;
             bool petFlip = false;
             Vector2 petFeet = Vector2.zero;
             if (hasPet)
             {
-                petGuid = r.ReadString();
-                petClip = r.ReadString();
                 petFrame = r.ReadByte();
                 petFlip = r.ReadBoolean();
-                petFeet = new Vector2(r.ReadSingle(), r.ReadSingle());
+                petFeet = Protocol.ReadQ(r);
             }
+            // A new level we haven't had the details of yet (lost or not due): wait for them (at most a second).
+            if (Protocol.Hash(scene) != sceneCode)
+                return;
 
             // A level change means the old positions mean nothing: start the motion history over.
             if (scene != Remote.Scene)
@@ -1184,6 +1271,7 @@ namespace GungeonOnline
             Remote.Health = health;
             Remote.MaxHealth = maxHealth;
             Remote.Armor = armor;
+            Remote.Blanks = blanks;
             Remote.Look = look;
             Remote.RootOffset = rootOffset;
             Remote.HasGun = hasGun;

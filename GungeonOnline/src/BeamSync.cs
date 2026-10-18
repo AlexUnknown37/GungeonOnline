@@ -93,7 +93,7 @@ namespace GungeonOnline
             if (beams.Count == 0 && lastSentCount == 0)
                 return;
             lastSentCount = beams.Count;
-            string level = LevelSync.CurrentLevelKey();
+            int level = LevelSync.CurrentLevelCode();
             session.SendUnreliable(MsgType.Beams, delegate (BinaryWriter w)
             {
                 w.Write(level);
@@ -110,10 +110,10 @@ namespace GungeonOnline
 
         public static void OnBeams(BinaryReader r)
         {
-            string level = r.ReadString();
+            int level = r.ReadInt32();
             int n = r.ReadByte();
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
-            bool here = me != null && level == LevelSync.CurrentLevelKey() && !GameManager.Instance.IsLoadingLevel;
+            bool here = me != null && level == LevelSync.CurrentLevelCode() && !GameManager.Instance.IsLoadingLevel;
             float now = Time.realtimeSinceStartup;
             List<Shown> shown = shownBy[Mathf.Clamp(session.From, 0, shownBy.Length - 1)];
             for (int i = 0; i < n; i++)

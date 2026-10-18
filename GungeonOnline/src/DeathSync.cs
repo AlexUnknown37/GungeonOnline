@@ -11,7 +11,10 @@ namespace GungeonOnline
     // - If you die while your partner is still alive, you become a ghost instead of getting a game over.
     // - While one player is a ghost, the next normal chest the living player opens brings them back
     //   (no loot from that chest), right at the chest.
-    // - If the last living player dies too, every game shows the death screen.
+    // - If the last living player dies too, every game shows the death screen. Only the host decides that: it ends
+    //   the run when every player (and a stand-in bot) has been down for a moment. Before, each game decided on its
+    //   own from its slightly late picture of the others: two players dying at almost the same moment each thought
+    //   the other was already a ghost and ended the run for everyone while a third player was still alive.
     // With more than two players: a ghost comes back when any living player opens a chest (every ghost at once).
     //
     // The game only does this when it is in local co-op mode with two players in one game. Online each
@@ -27,6 +30,37 @@ namespace GungeonOnline
         {
             session = netSession;
             harmony.PatchAll(typeof(DeathSync));
+            System.Type revive = AccessTools.Inner(typeof(PlayerController), "<CoopResurrectInternal>c__Iterator2");
+            System.Reflection.MethodInfo step = revive != null ? AccessTools.Method(revive, "MoveNext") : null;
+            if (step != null)
+                harmony.Patch(step, prefix: new HarmonyMethod(typeof(DeathSync), "BeforeReviveStep"),
+                    finalizer: new HarmonyMethod(typeof(DeathSync), "AfterReviveStep"));
+            else
+                Plugin.Log.LogWarning("Couldn't find the revive routine; a revive without a second co-op player may stop halfway.");
+        }
+
+        // Coming back to life, the game refreshes "the other co-op player's" stats. Online there's often no second
+        // player in our game (no stand-in bot): that was null, the revive stopped halfway and could leave us
+        // without control or unhittable. While it runs, "the other player" of a lone player is the player itself.
+        private static bool reviving;
+
+        private static void BeforeReviveStep()
+        {
+            reviving = true;
+        }
+
+        private static System.Exception AfterReviveStep(System.Exception __exception)
+        {
+            reviving = false;
+            return __exception;
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(GameManager), "GetOtherPlayer")]
+        private static void AfterGetOtherPlayer(PlayerController __0, ref PlayerController __result)
+        {
+            if (reviving && __result == null)
+                __result = __0;
         }
 
         private static bool Connected
@@ -65,20 +99,6 @@ namespace GungeonOnline
             }
         }
 
-        // Is every other player down (a ghost, dead) or without a character?
-        private static bool EveryoneElseDown
-        {
-            get
-            {
-                foreach (RemotePlayerState r in session.Remotes)
-                {
-                    if (r.HasPlayer && !r.IsDead)
-                        return false;
-                }
-                return true;
-            }
-        }
-
         // ---- Dying ----
 
         [HarmonyPrefix]
@@ -90,22 +110,57 @@ namespace GungeonOnline
             if (GameManager.Instance.IsFoyer)
                 return true;
 
-            if (PartnerAliveHere)
+            // Anyone else in the run: become a ghost and say so. Whether that was the last of us is the host's call
+            // (Update), made once everyone's state has arrived - never on our own, possibly out-of-date, view.
+            if (AnyoneElseInRun)
             {
-                Plugin.Log.LogInfo("We died; partner is alive, so we become a ghost until they open a chest.");
+                Plugin.Log.LogInfo(PartnerAliveHere ? "We died; another player is alive, so we become a ghost until they open a chest."
+                    : "We died; we become a ghost and the host checks whether anyone is still standing.");
                 bool falling = (bool)isFallingField.GetValue(__instance);
                 __instance.StartCoroutine(__instance.HandleCoopDeath(falling));
                 session.SendReliable(MsgType.PlayerDied, null);
                 return false;
             }
-
-            // Everyone else is already a ghost (or gone): this is a normal game over, for all of us.
-            if (PartnerIsGhost && EveryoneElseDown)
-            {
-                Plugin.Log.LogInfo("We died while everyone else is a ghost: game over for all.");
-                session.SendReliable(MsgType.TeamWiped, null);
-            }
             return true;
+        }
+
+        // Is any other player (or the host's stand-in) in a run with a character?
+        private static bool AnyoneElseInRun
+        {
+            get
+            {
+                foreach (RemotePlayerState r in session.Remotes)
+                {
+                    if (r.HasPlayer)
+                        return true;
+                }
+                return StandIn.Active && StandIn.Player != null;
+            }
+        }
+
+        // Host: is the stand-in bot (if any) down too?
+        private static bool StandInDown
+        {
+            get
+            {
+                PlayerController bot = StandIn.Active ? StandIn.Player : null;
+                return bot == null || bot.IsGhost || bot.healthHaver == null || bot.healthHaver.IsDead;
+            }
+        }
+
+        // Host: is every other player down, or not on our floor (they can't come and get us)?
+        private static bool EveryoneElseDownHere
+        {
+            get
+            {
+                string level = LevelSync.CurrentLevelKey();
+                foreach (RemotePlayerState r in session.Remotes)
+                {
+                    if (r.HasPlayer && !r.IsDead && r.Scene == level)
+                        return false;
+                }
+                return true;
+            }
         }
 
         public static void OnPartnerDied()
@@ -115,9 +170,9 @@ namespace GungeonOnline
 
         // The living partner died too: run the normal death (death screen) for our ghost.
         // ---- Everyone dead? ----
-        // Checked every frame instead of relying only on the TeamWiped message: when both players die at the
-        // same moment, each game still saw the other as alive, both became ghosts and nobody got a death screen.
-        private const float AllDeadGrace = 1f;     // seconds both must be down before ending the run
+        // The host checks every frame: when every player has been down for a moment (a revive in that time
+        // cancels it), it ends the run for all (TeamWiped). Without a host any more, a lone ghost ends its own run.
+        private const float AllDeadGrace = 1.5f;   // seconds everyone must be down before the host ends the run
         private const float PartnerGoneGrace = 3f; // a ghost whose partner disconnected
         private static float allDeadSince = -1f;
 
@@ -129,8 +184,14 @@ namespace GungeonOnline
                 allDeadSince = -1f;
                 return;
             }
-            bool partnerDown = Connected ? EveryoneElseDown : true;
-            if (!partnerDown)
+            // Online, only the host decides; guests wait for its TeamWiped.
+            if (Connected && (session.Link == null || !session.Link.IsHost))
+            {
+                allDeadSince = -1f;
+                return;
+            }
+            bool othersDown = Connected ? EveryoneElseDownHere && StandInDown : true;
+            if (!othersDown)
             {
                 allDeadSince = -1f;
                 return;
@@ -143,14 +204,18 @@ namespace GungeonOnline
             }
             if (now - allDeadSince >= (Connected ? AllDeadGrace : PartnerGoneGrace))
             {
-                Plugin.Log.LogInfo(Connected ? "Every player is down: game over." : "We're a ghost and everyone else is gone: game over.");
+                Plugin.Log.LogInfo(Connected ? "Every player is down: game over for all." : "We're a ghost and everyone else is gone: game over.");
+                if (Connected)
+                    session.SendReliable(MsgType.TeamWiped, null);
                 ForceGameOver();
             }
         }
 
         public static void OnTeamWiped()
         {
-            Plugin.Log.LogInfo(session.PeerName + " died last: game over.");
+            if (session.From != 0)
+                return; // only the host ends the run (an older game may still send this on its own)
+            Plugin.Log.LogInfo("The host says every player is down: game over.");
             ForceGameOver();
         }
 

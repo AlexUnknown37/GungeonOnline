@@ -22,7 +22,10 @@
 - Enemies: shared health and deaths; the game in charge of a room decides enemy attacks, targets and movement
 - Teleport to fights, tougher enemies with more players, shared money and keys, optional split money
 - Co-op deaths: ghost mode, revive from chests or the Cultist's Friendship Cookie, game over when everyone is down
-- Players who drop out keep playing as a bot with their gear until they rejoin; Take a Break lets a bot play for you
+- A player who drops out keeps playing as a bot with their gear until they rejoin (one bot at a time); Take a Break lets a bot play for you
+- Status effects on enemies (freeze, charm, fire, poison...) happen in every game
+- Bullets look the same for everyone, items and synergies included (tints, size, bounces, piercing, chain lightning, orbiting/spiral bullets, gun effects); all companions and orbitals show
+- Same room decorations in every game
 - Tables (flip/push), breakables, rolling barrels, petting other players' dogs, shared pause, optional PvP
 - Loop The Gungeon: loops (with the time tube) and loop difficulty shared with everyone
 
@@ -32,8 +35,8 @@ All of it is experimental. See `MODLOG.md` for the detailed (and honest) develop
 
 - Enemy bullets with random spread or homing can still differ a little between games
 - Items dropped on death aren't synced
-- Small breakables (bushes, candles) sometimes stay standing in another player's game
-- Only one bot can stand in for a dropped player at a time (the game has two player slots)
+- Pushed barrels and crates can end up in different spots in different games
+- Only one bot can be hosted at a time: if several players drop out (even everyone), only the first gets a bot (the host's game has room for one extra character)
 - Many items, guns, bosses and special rooms have never been tested
 - Performance and network smoothness still need work
 

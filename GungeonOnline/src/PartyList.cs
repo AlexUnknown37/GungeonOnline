@@ -2,14 +2,15 @@ using UnityEngine;
 
 namespace GungeonOnline
 {
-    // The other players down the right side of the screen: their character, name and health (hearts and armor).
+    // The other players down the right side of the screen: their character, name, health (hearts and armor) and
+    // the blanks they carry.
     // One heart container per heart of max health, wrapping onto more rows, so a player who finds more hearts gets
     // a longer bar. Everything is drawn in pixel steps that grow with the window, like the game's own HUD.
     public static class PartyList
     {
         private const int HeartsPerRow = 8;
 
-        private static Texture2D heart, shield, white;
+        private static Texture2D heart, shield, blank, white;
 
         private static readonly string[] HeartShape =
         {
@@ -31,7 +32,17 @@ namespace GungeonOnline
             "   X   ",
         };
 
+        private static readonly string[] BlankShape =
+        {
+            " XXX ",
+            "XXXXX",
+            "XXXXX",
+            "XXXXX",
+            " XXX ",
+        };
+
         private static readonly Color Full = new Color(0.92f, 0.13f, 0.15f);
+        private static readonly Color BlankColor = new Color(0.55f, 0.85f, 1f);
         private static readonly Color Empty = new Color(0.22f, 0.22f, 0.25f);
         private static readonly Color ArmorColor = new Color(0.35f, 0.65f, 1f);
 
@@ -121,6 +132,15 @@ namespace GungeonOnline
                     GUI.color = ArmorColor;
                     GUI.DrawTexture(Cell(tx, y + nameH, i, heartStep, px), shield);
                 }
+                // Blanks on a row of their own below.
+                int blankRow = (i + HeartsPerRow - 1) / HeartsPerRow * HeartsPerRow;
+                if (i == 0) blankRow = HeartsPerRow;
+                for (int b = 0; b < Blanks(e); b++)
+                {
+                    GUI.color = BlankColor;
+                    Rect c = Cell(tx, y + nameH, blankRow + b, heartStep, px);
+                    GUI.DrawTexture(new Rect(c.x + c.width * 0.15f, c.y + c.height * 0.15f, c.width * 0.7f, c.height * 0.7f), blank);
+                }
                 y += rowH + 3f * px;
             }
             GUI.color = Color.white;
@@ -130,6 +150,7 @@ namespace GungeonOnline
         {
             public string Name;
             public float Health, Max, Armor;
+            public int Blanks;
             public bool Ghost, Bot;
             public tk2dSpriteDefinition Look;
         }
@@ -152,6 +173,7 @@ namespace GungeonOnline
                     e.Health = r.Health;
                     e.Max = r.MaxHealth;
                     e.Armor = r.Armor;
+                    e.Blanks = r.Blanks;
                     e.Ghost = r.IsDead;
                     e.Bot = r.OnBreak;
                     e.Look = Plugin.Puppets[slot] != null ? Plugin.Puppets[slot].Icon() : null;
@@ -163,6 +185,7 @@ namespace GungeonOnline
                     e.Health = p.healthHaver.GetCurrentHealth();
                     e.Max = p.healthHaver.GetMaxHealth();
                     e.Armor = p.healthHaver.Armor;
+                    e.Blanks = p.Blanks;
                     e.Ghost = p.IsGhost || p.healthHaver.IsDead;
                     e.Bot = true;
                     e.Look = IdleOf(p);
@@ -183,10 +206,15 @@ namespace GungeonOnline
             return Mathf.Clamp(Mathf.CeilToInt(e.Armor - 0.01f), 0, 200);
         }
 
+        private static int Blanks(Entry e)
+        {
+            return Mathf.Clamp(e.Blanks, 0, HeartsPerRow);
+        }
+
         // How tall one player's block is at a given pixel size (picture, or name plus rows of hearts).
         private static float EntryHeight(Entry e, float px)
         {
-            int rows = Mathf.Max(1, Mathf.CeilToInt((Containers(e) + Shields(e)) / (float)HeartsPerRow));
+            int rows = Mathf.Max(1, Mathf.CeilToInt((Containers(e) + Shields(e)) / (float)HeartsPerRow)) + (Blanks(e) > 0 ? 1 : 0);
             return Mathf.Max(22f * px, 9f * px + rows * 9f * px) + 4f * px;
         }
 
@@ -265,6 +293,8 @@ namespace GungeonOnline
                 heart = Shape(HeartShape);
             if (shield == null)
                 shield = Shape(ShieldShape);
+            if (blank == null)
+                blank = Shape(BlankShape);
             if (white == null)
             {
                 white = new Texture2D(1, 1);

@@ -103,7 +103,7 @@ namespace GungeonOnline
                     Plugin.ScaleEnemyHealth.Value = scale;
                     session.SendRules();
                 }
-                bool split = GUILayout.Toggle(Plugin.HalfMoney.Value, " Split money: pickups count 1/players (when you host)");
+                bool split = GUILayout.Toggle(Plugin.HalfMoney.Value, " Split boss money between players (when you host)");
                 if (split != Plugin.HalfMoney.Value)
                 {
                     Plugin.HalfMoney.Value = split;

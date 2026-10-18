@@ -573,21 +573,39 @@ namespace GungeonOnline
             lastKeys = c.KeyBullets;
         }
 
-        // Half money (host rule, on by default): a casing pickup is worth half while we share a purse online.
-        // Halves that don't come out even are saved up, so nothing is lost over a run.
+        // Split money (host rule, on by default): money that drops in every game at once counts 1/players, so the
+        // shared purse doesn't get it once per player. That's only a boss's drop now: an ordinary enemy drops its
+        // money in the killer's game alone (the copies other games kill drop nothing), so that counts in full.
+        // (Before, every pickup was split - with 4 players a run earned a quarter of a solo run.)
+        // Parts that don't come out even are saved up, so nothing is lost over a run.
         private static float moneyCarry;
+        private static bool bossDropping;
 
         [HarmonyPrefix]
-        [HarmonyPatch(typeof(CurrencyPickup), "Pickup")]
-        private static void BeforeCurrencyPickup(CurrencyPickup __instance, PlayerController player)
+        [HarmonyPatch(typeof(AIActor), "HandleLootPinata")]
+        private static void BeforeBossDrop(AIActor __instance)
         {
-            if (__instance.IsMetaCurrency || player == null || player != Me || !session.HalfMoney || !InSharedRun())
+            bossDropping = __instance.healthHaver != null && __instance.healthHaver.IsBoss;
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(AIActor), "HandleLootPinata")]
+        private static void AfterBossDrop()
+        {
+            bossDropping = false;
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(LootEngine), "SpawnCurrency", new System.Type[] { typeof(Vector2), typeof(int), typeof(bool),
+            typeof(Vector2?), typeof(float?), typeof(float), typeof(float) })]
+        private static void BeforeSpawnCurrency(ref int __1, bool __2)
+        {
+            if (!bossDropping || __2 || !session.HalfMoney || !InSharedRun())
                 return;
-            // Every game drops money for the same kills, so each pickup counts 1/players (half with two).
-            float half = __instance.currencyValue / (float)PlayersInRun() + moneyCarry;
-            int give = Mathf.FloorToInt(half);
-            moneyCarry = half - give;
-            __instance.currencyValue = give;
+            float share = __1 / (float)PlayersInRun() + moneyCarry;
+            int give = Mathf.FloorToInt(share);
+            moneyCarry = share - give;
+            __1 = give;
         }
 
         // ---- Thief rat ----

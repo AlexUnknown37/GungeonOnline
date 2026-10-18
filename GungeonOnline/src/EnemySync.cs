@@ -6,14 +6,15 @@ using UnityEngine;
 
 namespace GungeonOnline
 {
-    // Enemy sync, step 1 ("shared health"):
-    // Both games run their own copy of every enemy (same seed = same rooms and enemies). Each enemy gets
+    // Enemy sync: shared health, deaths and positions.
+    // Every game runs its own copy of every enemy (same seed = same rooms and enemies). Each enemy gets
     // the same ID in both games: its room's index in the dungeon plus the order it joined that room.
     // - Damage dealt to an enemy in one game is sent to the other, so health matches (bosses too).
     // - An enemy that dies in one game dies in the other; enemies already killed by the partner die as
     //   soon as they appear when you enter that room later.
-    // - Whoever is alive in a room sends its enemies' positions and health ~10x a second; the other game
-    //   glides drifted enemies back and never lets an enemy have more health than the sender's copy.
+    // - The game in charge of a room (the lowest-numbered living player in it) sends its enemies' positions,
+    //   velocities, targets and health 15x a second; the other games walk their copies along the same path and
+    //   never let an enemy have more health than the sender's copy.
     // Which attack an enemy starts, and at whom, is decided by the game in charge of the room (see AttackSync).
     public static class EnemySync
     {
@@ -160,12 +161,13 @@ namespace GungeonOnline
 
         // ---- Damage ----
 
-        private static float healthBefore;
-
+        // __state: the health before this hit, or -1 when the hit doesn't happen here or the enemy was already dead
+        // (hits on a dead body happen a lot in a busy fight and must not report the death again).
         [HarmonyPrefix]
         [HarmonyPatch(typeof(HealthHaver), "ApplyDamage")]
-        private static bool BeforeApplyDamage(HealthHaver __instance)
+        private static bool BeforeApplyDamage(HealthHaver __instance, out float __state)
         {
+            __state = -1f;
             if (__instance.aiActor != null && Connected && !applyingRemote)
             {
                 if (RemoteBulletHitting)
@@ -175,7 +177,8 @@ namespace GungeonOnline
                 if (LocalIsGhost)
                     return false;
             }
-            healthBefore = __instance.GetCurrentHealth();
+            if (!__instance.IsDead)
+                __state = __instance.GetCurrentHealth();
             return true;
         }
 
@@ -190,19 +193,23 @@ namespace GungeonOnline
 
         [HarmonyPostfix]
         [HarmonyPatch(typeof(HealthHaver), "ApplyDamage")]
-        private static void AfterApplyDamage(HealthHaver __instance)
+        private static void AfterApplyDamage(HealthHaver __instance, DamageCategory __4, float __state)
         {
-            if (applyingRemote || !Connected || __instance.aiActor == null)
+            if (applyingRemote || !Connected || __instance.aiActor == null || __state < 0f)
                 return;
             int id;
             if (!idOf.TryGetValue(__instance.aiActor, out id))
                 return;
-            float dealt = healthBefore - __instance.GetCurrentHealth();
-            string level = LevelSync.CurrentLevelKey();
+            float dealt = __state - __instance.GetCurrentHealth();
+            int level = LevelSync.CurrentLevelCode();
             string guid = __instance.aiActor.EnemyGuid;
             if (__instance.IsDead)
             {
                 deadIds.Add(id);
+                // Burning or poison ticks in every game at once: then only the room leader's game reports the death.
+                // Anything else that kills here (our bullet, explosion, companion) is ours to report.
+                if (__4 == DamageCategory.DamageOverTime && !LocalBulletHitting && !LeadsEnemy(__instance.aiActor))
+                    return;
                 session.SendReliable(MsgType.EnemyDied, delegate (BinaryWriter w)
                 {
                     w.Write(level); w.Write(id); w.Write(guid);
@@ -219,11 +226,11 @@ namespace GungeonOnline
 
         public static void OnEnemyDamage(BinaryReader r)
         {
-            string level = r.ReadString();
+            int level = r.ReadInt32();
             int id = r.ReadInt32();
             string guid = r.ReadString();
             float amount = r.ReadSingle();
-            if (level != LevelSync.CurrentLevelKey())
+            if (level != LevelSync.CurrentLevelCode())
                 return;
             CheckFloor();
             AIActor a = Find(id, guid);
@@ -233,10 +240,10 @@ namespace GungeonOnline
 
         public static void OnEnemyDied(BinaryReader r)
         {
-            string level = r.ReadString();
+            int level = r.ReadInt32();
             int id = r.ReadInt32();
             string guid = r.ReadString();
-            if (level != LevelSync.CurrentLevelKey())
+            if (level != LevelSync.CurrentLevelCode())
                 return;
             CheckFloor();
             deadIds.Add(id);
@@ -307,6 +314,11 @@ namespace GungeonOnline
             public float ReceivedAt;
         }
 
+        public static int KindOf(AIActor a)
+        {
+            return KindHash(a != null ? a.EnemyGuid : null);
+        }
+
         // The same number for the same kind of enemy in every game (string.GetHashCode isn't promised to be).
         private static int KindHash(string guid)
         {
@@ -365,10 +377,10 @@ namespace GungeonOnline
         {
             if (room == null || GameManager.Instance.Dungeon == null)
                 return false;
-            string level = LevelSync.CurrentLevelKey();
+            int level = LevelSync.CurrentLevelCode();
             foreach (RemotePlayerState p in session.Remotes)
             {
-                if (p.Slot >= session.LocalSlot || !p.HasPlayer || p.IsDead || p.Scene != level)
+                if (p.Slot >= session.LocalSlot || !p.HasPlayer || p.IsDead || p.Scene != LevelSync.CurrentLevelKey())
                     continue;
                 Vector2 f = p.FeetPosition;
                 RoomHandler theirs = GameManager.Instance.Dungeon.data.GetAbsoluteRoomFromPosition(
@@ -428,7 +440,7 @@ namespace GungeonOnline
             }
             if (ids.Count == 0)
                 return;
-            string level = LevelSync.CurrentLevelKey();
+            int level = LevelSync.CurrentLevelCode();
             session.SendUnreliable(MsgType.EnemyStates, delegate (BinaryWriter w)
             {
                 w.Write(level);
@@ -449,9 +461,9 @@ namespace GungeonOnline
 
         public static void OnEnemyStates(BinaryReader r)
         {
-            string level = r.ReadString();
+            int level = r.ReadInt32();
             int count = r.ReadUInt16();
-            if (level != LevelSync.CurrentLevelKey())
+            if (level != LevelSync.CurrentLevelCode())
                 return;
             CheckFloor();
             float now = Time.realtimeSinceStartup;
@@ -604,11 +616,11 @@ namespace GungeonOnline
             if (!session.Link.IsHost || GameManager.Instance.Dungeon == null)
                 return;
             Dungeon d = GameManager.Instance.Dungeon;
-            string level = LevelSync.CurrentLevelKey();
+            int level = LevelSync.CurrentLevelCode();
             for (int slot = 1; slot < clearedListSentFor.Length; slot++)
             {
                 RemotePlayerState p = session.Players[slot];
-                if (!p.Connected || !p.HasPlayer || p.Scene != level)
+                if (!p.Connected || !p.HasPlayer || p.Scene != LevelSync.CurrentLevelKey())
                 {
                     clearedListSentFor[slot] = null;
                     continue;
@@ -679,9 +691,10 @@ namespace GungeonOnline
                 return;
             CheckFloor();
             int roomIndex = GameManager.Instance.Dungeon.data.rooms.IndexOf(__instance);
-            if (roomIndex < 0 || !clearedSent.Add(roomIndex))
+            // Every game in the room clears it at about the same time: only the one leading it says so.
+            if (roomIndex < 0 || !(InCharge(__instance) && !LowerPlayerInRoom(__instance)) || !clearedSent.Add(roomIndex))
                 return;
-            string level = LevelSync.CurrentLevelKey();
+            int level = LevelSync.CurrentLevelCode();
             session.SendReliable(MsgType.RoomCleared, delegate (BinaryWriter w)
             {
                 w.Write(level);
@@ -691,9 +704,9 @@ namespace GungeonOnline
 
         public static void OnRoomCleared(BinaryReader r)
         {
-            string level = r.ReadString();
+            int level = r.ReadInt32();
             int roomIndex = r.ReadInt32();
-            if (level != LevelSync.CurrentLevelKey() || !GameManager.HasInstance || GameManager.Instance.Dungeon == null)
+            if (level != LevelSync.CurrentLevelCode() || !GameManager.HasInstance || GameManager.Instance.Dungeon == null)
                 return;
             List<RoomHandler> rooms = GameManager.Instance.Dungeon.data.rooms;
             if (roomIndex < 0 || roomIndex >= rooms.Count)
@@ -752,7 +765,7 @@ namespace GungeonOnline
             if (!DeathSync.PartnerIsGhost && !bossRoom && !session.FightPull)
                 return;
             Plugin.Log.LogInfo("Fight started in " + __instance.GetRoomName() + (bossRoom ? " (boss)" : "") + ": calling the others here.");
-            string level = LevelSync.CurrentLevelKey();
+            int level = LevelSync.CurrentLevelCode();
             session.SendReliable(MsgType.PullGhost, delegate (BinaryWriter w)
             {
                 w.Write(level); w.Write(pos.x); w.Write(pos.y);
@@ -761,10 +774,10 @@ namespace GungeonOnline
 
         public static void OnPullGhost(BinaryReader r)
         {
-            string level = r.ReadString();
+            int level = r.ReadInt32();
             Vector2 pos = new Vector2(r.ReadSingle(), r.ReadSingle());
             PlayerController me = Me;
-            if (me == null || level != LevelSync.CurrentLevelKey())
+            if (me == null || level != LevelSync.CurrentLevelCode())
                 return;
             Plugin.Log.LogInfo(session.PeerName + " started a fight" + (session.FightPull ? "" : " (teleport to fights is off)") + ".");
             if (!me.IsGhost)

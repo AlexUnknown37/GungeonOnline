@@ -176,7 +176,7 @@ namespace GungeonOnline
 
         private static void Send(AIActor a, int id, int index, byte result, int diceSeed)
         {
-            string level = LevelSync.CurrentLevelKey();
+            int level = LevelSync.CurrentLevelCode();
             Vector2 pos = a.specRigidbody != null ? a.specRigidbody.UnitCenter : (Vector2)a.transform.position;
             byte target = (byte)TargetSync.SlotOfTarget(a);
             session.SendReliable(MsgType.AttackStart, delegate (BinaryWriter w)
@@ -193,14 +193,14 @@ namespace GungeonOnline
 
         public static void OnAttackStart(BinaryReader r)
         {
-            string level = r.ReadString();
+            int level = r.ReadInt32();
             int id = r.ReadInt32();
             string guid = r.ReadString();
             int index = r.ReadUInt16();
             int target = r.ReadByte();
             Vector2 pos = new Vector2(r.ReadSingle(), r.ReadSingle());
             int diceSeed = r.ReadInt32();
-            if (level != LevelSync.CurrentLevelKey())
+            if (level != LevelSync.CurrentLevelCode())
                 return;
             AIActor a = EnemySync.ById(id);
             if (a == null || a.EnemyGuid != guid || a.healthHaver == null || a.healthHaver.IsDead || EnemySync.LeadsEnemy(a))
