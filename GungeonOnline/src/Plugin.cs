@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.115.0";
+        public const string ModVersion = "0.122.0";
 
         public static ManualLogSource Log;
 
@@ -44,6 +44,8 @@ namespace GungeonOnline
         private void Awake()
         {
             Log = Logger;
+            SessionLog.Start();
+            FreezeWatch.Start();
             PlayerName = Config.Bind("General", "PlayerName", "",
                 "Name other players see. Leave empty to use your Steam name.");
             toggleWindowKey = Config.Bind("General", "ToggleWindowKey", KeyCode.F8,
@@ -226,6 +228,7 @@ namespace GungeonOnline
                     + ", input " + me.CurrentInputState + ", reviving " + me.IsCurrentlyCoopReviving + ", ghost " + me.IsGhost
                     + ", hitbox " + (me.specRigidbody != null && me.specRigidbody.HitboxPixelCollider != null && me.specRigidbody.HitboxPixelCollider.Enabled)
                     + ", collides " + (me.specRigidbody != null && me.specRigidbody.CollideWithOthers));
+                Log.LogInfo("Test: " + InventorySync.DescribeGuns(me));
                 FlippableCover t = testTable != null ? testTable : NearestTable(me, true);
                 if (t != null)
                     Log.LogInfo("Test: table '" + t.name + "' transform " + t.transform.position + ", body " + (t.specRigidbody != null
@@ -233,6 +236,58 @@ namespace GungeonOnline
                         + ", flipped " + t.IsFlipped + ", tracked " + WorldSync.Describe(t));
             }
             // G: get an AK-47 (a gun that isn't anyone's starting gun, to test gear being kept).
+            // N: take the exit now (a guest's after 2 s, like an elevator ride - pressing N on a guest and then the host
+            // has both leave at the same moment).
+            if (Input.GetKeyDown(KeyCode.N) && !GameManager.Instance.IsFoyer && !GameManager.Instance.IsLoadingLevel)
+            {
+                bool host = session.Link == null || session.Link.IsHost;
+                Log.LogInfo("Test: taking the exit" + (host ? "." : " in 2 s."));
+                GameManager.Instance.DelayedLoadNextLevel(host ? 0.5f : 2f);
+                return;
+            }
+            // O: lock the game up for 15 s (checks that FreezeWatch reports it).
+            if (Input.GetKeyDown(KeyCode.O))
+            {
+                Log.LogInfo("Test: freezing the game for 15 s.");
+                float until = Time.realtimeSinceStartup + 15f;
+                while (Time.realtimeSinceStartup < until) { }
+                return;
+            }
+            // P: drop us (and the stand-in bot, if any) into the pit nearest to us in this room.
+            if (Input.GetKeyDown(KeyCode.P) && !GameManager.Instance.IsFoyer)
+            {
+                Dungeonator.RoomHandler room = me.CurrentRoom;
+                Dungeonator.DungeonData data = GameManager.Instance.Dungeon.data;
+                Vector2 pit = Vector2.zero;
+                float pitDist = float.MaxValue;
+                if (room != null)
+                {
+                    foreach (IntVector2 c in room.Cells)
+                    {
+                        if (data.CheckInBoundsAndValid(c) && data[c].type == Dungeonator.CellType.PIT)
+                        {
+                            float d = Vector2.Distance(c.ToCenterVector2(), me.CenterPosition);
+                            if (d < pitDist) { pitDist = d; pit = c.ToCenterVector2(); }
+                        }
+                    }
+                }
+                if (pitDist < float.MaxValue)
+                {
+                    // Like a secret floor's open entrance: falling here loads another level (the Keep, as a test).
+                    Log.LogInfo("Test: dropping us" + (StandIn.Active ? " and the stand-in" : "") + " into the pit at " + pit
+                        + ", as a hole that leads to the Keep.");
+                    me.LevelToLoadOnPitfall = "tt_castle";
+                    me.WarpToPoint(pit, false, false);
+                    if (StandIn.Active && StandIn.Player != null)
+                    {
+                        StandIn.Player.LevelToLoadOnPitfall = "tt_castle";
+                        StandIn.Player.WarpToPoint(pit + new Vector2(0.5f, 0f), false, false);
+                    }
+                }
+                else
+                    Log.LogInfo("Test: no pit in this room.");
+                return;
+            }
             if (Input.GetKeyDown(KeyCode.G))
             {
                 Gun ak = PickupObjectDatabase.GetById(15) as Gun;
@@ -359,6 +414,19 @@ namespace GungeonOnline
         }
 
         private void Update()
+        {
+            FreezeWatch.FrameStart();
+            try
+            {
+                UpdateParts();
+            }
+            finally
+            {
+                FreezeWatch.FrameEnd();
+            }
+        }
+
+        private void UpdateParts()
         {
             if (Input.GetKeyDown(toggleWindowKey.Value))
                 window.Visible = !window.Visible;

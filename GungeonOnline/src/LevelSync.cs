@@ -594,6 +594,21 @@ namespace GungeonOnline
                     gm.DelayedLoadNextLevel(LoadDelay);
                 return;
             }
+            // We both took the exit at the same moment: the host's load came while our elevator was starting, so it
+            // couldn't be followed then - and we'd wait for it forever. Follow it now.
+            if (missedLoad != null && !gm.IsLoadingLevel && !waitingForRunStart)
+            {
+                LevelInfo m = missedLoad;
+                missedLoad = null;
+                // Only a floor other than the one we're on (an old missed load must not reload this floor).
+                bool sameAsOurs = ourLevel != null && ourLevel.Seed == m.Seed && ourLevel.Index == m.Index && ourLevel.Custom == m.Custom;
+                if (Time.realtimeSinceStartup - missedLoadAt < 30f && !sameAsOurs)
+                {
+                    Plugin.Log.LogInfo("The host already took the exit while we did: following them now.");
+                    FollowLevel(gm, m.Seed, m.Index, m.Custom);
+                    return;
+                }
+            }
             if (Time.realtimeSinceStartup >= waitingToastAt)
             {
                 waitingToastAt = Time.realtimeSinceStartup + 5f;
@@ -675,10 +690,23 @@ namespace GungeonOnline
                 return;
             if (gm.IsLoadingLevel)
             {
-                // Starting a second load during one hangs the game.
-                Plugin.Log.LogWarning("Host loaded a level while we were still loading; ignoring it.");
+                // Starting a second load during one hangs the game. But keep it: if we were taking the exit at the
+                // same moment, our elevator then waits for this very load (see UpdateExitWait).
+                Plugin.Log.LogWarning("Host loaded a level while we were still loading; following it once we can.");
+                missedLoad = hostLevel;
+                missedLoadAt = Time.realtimeSinceStartup;
                 return;
             }
+            FollowLevel(gm, seed, levelIndex, customLevel);
+        }
+
+        // A host load that arrived while we were loading ourselves (both took the exit at the same moment).
+        private static LevelInfo missedLoad;
+        private static float missedLoadAt;
+
+        private static void FollowLevel(GameManager gm, int seed, int levelIndex, string customLevel)
+        {
+            missedLoad = null;
             pendingFoyerReturn = false;
             pendingEndRun = false;
 
@@ -689,7 +717,10 @@ namespace GungeonOnline
                 Plugin.Log.LogInfo("Host loaded the floor we're already on; not loading it again.");
                 return;
             }
-            ourLevel = hostLevel;
+            ourLevel = new LevelInfo();
+            ourLevel.Seed = seed;
+            ourLevel.Index = levelIndex;
+            ourLevel.Custom = customLevel;
             Plugin.Log.LogInfo("Following host to level (index " + levelIndex + ", custom '" + customLevel + "', seed " + seed + ")");
             gm.InitializeForRunWithSeed(seed);
             bool wasInFoyer = gm.IsFoyer;

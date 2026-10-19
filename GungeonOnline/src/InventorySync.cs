@@ -103,6 +103,7 @@ namespace GungeonOnline
         private static string rejoinCharacter;
         private static float rejoinOfferedAt;
         private static bool rejoinPicked;
+        private static float rejoinPickedAt = -100f;
 
         // Joiner: the character we play in the host's current run (to come back as it after visiting the Breach).
         private static int myRunSeed;
@@ -167,6 +168,7 @@ namespace GungeonOnline
         {
             if (!Connected || !GameManager.HasInstance)
                 return;
+            FixStuckNoGun();
             GameManager gm = GameManager.Instance;
             PlayerController me = gm.PrimaryPlayer;
             bool inRun = me != null && !gm.IsFoyer && !gm.IsLoadingLevel && gm.Dungeon != null && gm.CurrentRunSeed != 0;
@@ -265,6 +267,7 @@ namespace GungeonOnline
                     if (!string.Equals(path, rejoinCharacter, System.StringComparison.OrdinalIgnoreCase))
                         continue;
                     rejoinPicked = true;
+                    rejoinPickedAt = Time.realtimeSinceStartup;
                     Plugin.Log.LogInfo("Picking our old character " + rejoinCharacter + ".");
                     Foyer.Instance.StartCoroutine(Foyer.Instance.OnSelectedCharacter(0.25f, flag));
                     return;
@@ -273,8 +276,10 @@ namespace GungeonOnline
                 Plugin.Log.LogWarning("Couldn't find our old character " + rejoinCharacter + " to pick; pick any character.");
                 return;
             }
-            // Character chosen: start the run right away (it joins the host's floor).
-            if (!gm.IsSelectingCharacter && gm.PrimaryPlayer != null && !Foyer.IsCurrentlyPlayingCharacterSelect)
+            // Character chosen and arrived (the game finishes setting it up a moment after the pick): start the run
+            // (it joins the host's floor).
+            if (!gm.IsSelectingCharacter && gm.PrimaryPlayer != null && !Foyer.IsCurrentlyPlayingCharacterSelect
+                && Time.realtimeSinceStartup - rejoinPickedAt > 3f)
             {
                 string now = gm.PrimaryPlayer.gameObject.name.Replace("(Clone)", "").Trim();
                 if (!string.Equals(now, rejoinCharacter, System.StringComparison.OrdinalIgnoreCase))
@@ -287,6 +292,35 @@ namespace GungeonOnline
                 Foyer.Instance.OnDepartedFoyer();
                 gm.DelayedLoadNextLevel(0.5f);
             }
+        }
+
+        // ---- Guns stuck away after a rejoin ----
+        // In the Breach the game puts every character's gun away (ForceNoGun) and takes it out again when they leave.
+        // Rejoining picked the character and left at once, before the new character had finished arriving: it put
+        // its gun away after we'd left, and nothing took it out again. The player carried guns but held none (and
+        // picked-up guns never showed either). If a gun stays put away for a few seconds in a run, take it out.
+        private static float noGunSince = -1f;
+
+        private static void FixStuckNoGun()
+        {
+            GameManager gm = GameManager.Instance;
+            PlayerController me = gm.PrimaryPlayer;
+            if (me == null || me.inventory == null || gm.IsFoyer || gm.IsLoadingLevel || !me.inventory.ForceNoGun
+                || me.inventory.AllGuns.Count == 0)
+            {
+                noGunSince = -1f;
+                return;
+            }
+            if (noGunSince < 0f)
+                noGunSince = Time.realtimeSinceStartup;
+            if (Time.realtimeSinceStartup - noGunSince < 3f)
+                return;
+            noGunSince = -1f;
+            me.inventory.ForceNoGun = false;
+            if (me.CurrentGun != null)
+                me.CurrentGun.gameObject.SetActive(true);
+            me.ProcessHandAttachment();
+            Plugin.Log.LogWarning("Our gun was stuck put away (left over from the Breach): took it out. " + DescribeGuns(me));
         }
 
         // ---- For the stand-in (host) ----
@@ -365,7 +399,7 @@ namespace GungeonOnline
             if (me == null || GameManager.Instance.CurrentRunSeed != s.Seed)
                 return;
             int got = Apply(me, s);
-            Plugin.Log.LogInfo("The host remembered our items: got " + got + " back.");
+            Plugin.Log.LogInfo("The host remembered our items: got " + got + " back. " + DescribeGuns(me));
             if (hadStandIn)
             {
                 // A bot played our character while we were gone: pick up where it is, still playing, until we move.
@@ -376,6 +410,24 @@ namespace GungeonOnline
             }
             else
                 Toast.Show("Welcome back! Your items and health were restored.", 5f);
+        }
+
+        // For the log: the guns a player has and can use right now.
+        public static string DescribeGuns(PlayerController me)
+        {
+            if (me == null || me.inventory == null)
+                return "No inventory.";
+            string list = "";
+            int broken = 0;
+            foreach (Gun g in me.inventory.AllGuns)
+            {
+                if (g == null) { broken++; continue; }
+                list += (list.Length > 0 ? ", " : "") + g.EncounterNameOrDisplayName + " " + g.CurrentAmmo + "/" + g.AdjustedMaxAmmo;
+            }
+            return "Guns: " + (list.Length > 0 ? list : "none") + (broken > 0 ? " (+" + broken + " missing)" : "")
+                + "; holding " + (me.CurrentGun != null ? me.CurrentGun.EncounterNameOrDisplayName : "nothing")
+                + (me.inventory.GunLocked.Value ? "; guns locked" : "") + (me.IsGhost ? "; ghost" : "")
+                + "; input " + me.CurrentInputState + ".";
         }
 
         // Give a character a remembered list of gear (guns with ammo, items, health, armor, blanks).

@@ -32,6 +32,7 @@ namespace GungeonOnline
 
         public static void End(string name, long before)
         {
+            FreezeWatch.Done(name);
             if (!Enabled)
                 return;
             long d = GC.GetTotalMemory(false) - before;

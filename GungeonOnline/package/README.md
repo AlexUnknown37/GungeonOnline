@@ -75,7 +75,8 @@ In `BepInEx/config/gungeononline.multiplayer.cfg` (or your mod manager's config 
 
 ## Troubleshooting
 
-- Check `BepInEx/LogOutput.log` in your mod profile. Gungeon Online's lines start with `[Gungeon Online]`.
+- Each game session is saved to `BepInEx/GungeonOnline-logs` in your mod profile (the last 10 are kept). After a problem, send the newest file there; it isn't erased when you open the game again. Gungeon Online's lines start with `[Gungeon Online]`.
+- If the game freezes, the same file says where (look for `[FreezeWatch]`). The host's file matters most.
 - LAN game not found? Make sure all PCs are on the same network and the firewall allows the game, then try typing the address instead.
 - Things look different for different players? Make sure everyone runs the same version of this mod and of any other gameplay mods.
 

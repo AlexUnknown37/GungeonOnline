@@ -366,10 +366,42 @@ namespace GungeonOnline
 
         // ---- While it plays ----
 
+        // Some holes take whoever falls in to another level (the Black Powder Mine's elevator shaft, the Rat's lair).
+        // The game lets one player's fall start that load; a bot following the host in fell at the same moment, both
+        // started the load, and the host's game froze. The bot never takes the group anywhere: its fall just puts it
+        // back on solid ground, and the host's fall still takes everyone (bot included) along.
+        private static readonly System.Reflection.FieldInfo cachedPitLevelField =
+            AccessTools.Field(typeof(PlayerController), "m_cachedLevelToLoadOnPitfall");
+
+        private static void ClearPitLevel(PlayerController who)
+        {
+            if (who == null)
+                return;
+            if (!string.IsNullOrEmpty(who.LevelToLoadOnPitfall))
+                who.LevelToLoadOnPitfall = string.Empty;
+            if (cachedPitLevelField != null && !string.IsNullOrEmpty(cachedPitLevelField.GetValue(who) as string))
+                cachedPitLevelField.SetValue(who, string.Empty);
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(PlayerController), "PitRespawn")]
+        private static void BeforePitRespawn(PlayerController __instance)
+        {
+            if (bot != null && __instance == bot)
+            {
+                bool hadLevel = !string.IsNullOrEmpty(__instance.LevelToLoadOnPitfall)
+                    || (cachedPitLevelField != null && !string.IsNullOrEmpty(cachedPitLevelField.GetValue(__instance) as string));
+                ClearPitLevel(__instance);
+                if (hadLevel)
+                    Plugin.Log.LogInfo("Stand-in fell into a hole that leads to another level: it just climbs back out (only the host's fall loads).");
+            }
+        }
+
         public static void Update()
         {
             if (bot == null)
                 return;
+            ClearPitLevel(bot);
             if (session == null || session.Link == null || !session.Link.IsHost)
             {
                 Remove(false);
