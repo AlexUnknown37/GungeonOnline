@@ -562,15 +562,15 @@ namespace GungeonOnline
             if (me == null || !InRunNow() || level != LevelSync.CurrentLevelKey())
                 return;
             PlayerConsumables c = me.carriedConsumables;
-            if (c.Currency != money || c.KeyBullets != keys)
-            {
-                c.Currency = money;
-                c.KeyBullets = keys;
-            }
-            // Not a change of ours to send.
+            // A change of ours this frame that Update hasn't sent yet (a pickup) stays on top of the host's total and
+            // still gets sent: overwriting it lost that pickup for good.
+            int unsentMoney = walletOwner == me ? c.Currency - lastMoney : 0;
+            int unsentKeys = walletOwner == me ? c.KeyBullets - lastKeys : 0;
+            c.Currency = Mathf.Max(0, money + unsentMoney);
+            c.KeyBullets = Mathf.Max(0, keys + unsentKeys);
             walletOwner = me;
-            lastMoney = c.Currency;
-            lastKeys = c.KeyBullets;
+            lastMoney = money;
+            lastKeys = keys;
         }
 
         // Split money (host rule, on by default): money that drops in every game at once counts 1/players, so the

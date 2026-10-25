@@ -17,6 +17,7 @@ namespace GungeonOnline
         public const byte Magic0 = (byte)'G';
         public const byte Magic1 = (byte)'O';
         private const float ResendInterval = 0.2f;
+        private const int MaxAhead = 1024;   // reliable packets kept while waiting for an earlier one
 
         public enum PacketKind : byte
         {
@@ -248,6 +249,8 @@ namespace GungeonOnline
                     short ahead = (short)(seq - peer.NextRecvSeq);
                     if (ahead < 0)
                         return; // already delivered; our ack was lost, so they re-sent
+                    if (ahead > MaxAhead)
+                        return; // far beyond anything sent in order: don't store it (a broken or hostile sender)
                     byte[] body = new byte[data.Length - 7];
                     Buffer.BlockCopy(data, 7, body, 0, body.Length);
                     peer.Early[seq] = body;
@@ -260,6 +263,45 @@ namespace GungeonOnline
                         RaisePacket(slot, next, 0, next.Length);
                     }
                     break;
+            }
+        }
+
+        // Self-check of the reliable delivery (run once at start, result in the log): packets out of order, twice,
+        // across the 65535 -> 0 wrap, from a restarted connection, and absurdly far ahead must come out once each,
+        // in order. A mistake here would silently stop every important message.
+        public static bool SelfTest(out string result)
+        {
+            UdpClient udp = null;
+            try
+            {
+                udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+                IPEndPoint host = new IPEndPoint(IPAddress.Loopback, ((IPEndPoint)udp.Client.LocalEndPoint).Port);
+                LanLink link = new LanLink(udp, false, host.Port, host);
+                List<int> got = new List<int>();
+                link.OnPacket = delegate (int slot, byte[] data, int offset, int length) { got.Add(data[offset]); };
+                ushort[] seqs = { 0, 2, 1, 1, 3, 3000 };      // 3000: far ahead, dropped
+                foreach (ushort q in seqs)
+                    link.HandleDatagram(Wrap(PacketKind.Reliable, q, new byte[] { (byte)(q % 256) }, 7), host);
+                // The host starts over (new epoch) just before the wrap.
+                ushort[] wrap = { 65535, 65534, 0 };
+                foreach (ushort q in wrap)
+                    link.HandleDatagram(Wrap(PacketKind.Reliable, q, new byte[] { (byte)(q == 0 ? 100 : q - 65434) }, 9), host);
+                string seen = string.Join(",", got.ConvertAll(delegate (int x) { return x.ToString(); }).ToArray());
+                // 0,1,2,3 in order; then the new epoch starts counting at its first packet (65535 = 101), so 65534
+                // (100, older) is dropped and 0 (100 again) follows 65535.
+                const string expected = "0,1,2,3,101,100";
+                result = seen == expected ? "ok" : "delivered " + seen + ", expected " + expected;
+                return seen == expected;
+            }
+            catch (Exception e)
+            {
+                result = e.GetType().Name + ": " + e.Message;
+                return false;
+            }
+            finally
+            {
+                if (udp != null)
+                    udp.Close();
             }
         }
 

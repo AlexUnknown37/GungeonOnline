@@ -22,6 +22,7 @@ namespace GungeonOnline
         private static Brain brain;
         private static int botSlot = -1;
         private static string botName = "";
+        private static string botKey = "";   // the player's lasting identity (Steam ID, or name): gear is remembered by it
         private static float nextStateAt, nextRememberAt, nextHudCheckAt;
         // The stand-in has the player's real gear on (until then it only has the character's starting kit, which
         // must never be remembered as theirs - that lost players their guns).
@@ -59,14 +60,14 @@ namespace GungeonOnline
         // ---- Coming and going ----
 
         // Host: a guest left. If they were in our run and we remember their gear, their character plays on.
-        public static void OnGuestLeft(int slot, string name, RemotePlayerState last)
+        public static void OnGuestLeft(int slot, string name, string key, RemotePlayerState last)
         {
             if (bot != null || !GameManager.HasInstance)
                 return;
             GameManager gm = GameManager.Instance;
             if (gm.IsFoyer || gm.IsLoadingLevel || gm.PrimaryPlayer == null || gm.SecondaryPlayer != null || gm.CurrentRunSeed == 0)
                 return;
-            string character = InventorySync.RememberedCharacter(name, gm.CurrentRunSeed);
+            string character = InventorySync.RememberedCharacter(key, gm.CurrentRunSeed);
             if (character == null)
             {
                 Plugin.Log.LogInfo(name + " left, but we don't know their gear in this run: no stand-in.");
@@ -85,7 +86,7 @@ namespace GungeonOnline
                 at = last.FeetPosition + last.RootOffset;
             try
             {
-                Spawn(prefab, at, slot, name);
+                Spawn(prefab, at, slot, name, key);
             }
             catch (System.Exception e)
             {
@@ -94,7 +95,7 @@ namespace GungeonOnline
             }
         }
 
-        private static void Spawn(GameObject prefab, Vector3 at, int slot, string name)
+        private static void Spawn(GameObject prefab, Vector3 at, int slot, string name, string key)
         {
             GameManager gm = GameManager.Instance;
             gm.CurrentGameType = GameManager.GameType.COOP_2_PLAYER;
@@ -108,18 +109,19 @@ namespace GungeonOnline
             gm.RefreshAllPlayers();
             botSlot = slot;
             botName = name;
+            botKey = key;
             geared = false;
             brain = new Brain(1, name);
             brain.Start(false);
             Autopilot.Add(brain);
-            gm.StartCoroutine(FinishSpawn(bot, name));
+            gm.StartCoroutine(FinishSpawn(bot, key));
             Plugin.Log.LogInfo(name + " left: their character keeps playing as a bot (stand-in in player " + (slot + 1) + "'s place).");
             Toast.Show(name + " left - a bot plays their character until they're back.", 5f);
             session.SendRosterNow();
         }
 
         // The rest of the game's co-op set-up happens a frame later, then the remembered gear goes on.
-        private static System.Collections.IEnumerator FinishSpawn(PlayerController who, string name)
+        private static System.Collections.IEnumerator FinishSpawn(PlayerController who, string key)
         {
             yield return null;
             if (who == null || who != bot)
@@ -141,38 +143,38 @@ namespace GungeonOnline
                 yield return null;
             if (who == null || who != bot)
                 yield break;
-            int given = InventorySync.ApplyRemembered(name, who);
+            int given = InventorySync.ApplyRemembered(key, who);
             geared = true;
-            Plugin.Log.LogInfo("Stand-in for " + name + " got their gear back (" + given + " items).");
+            Plugin.Log.LogInfo("Stand-in for " + botName + " got their gear back (" + given + " items).");
         }
 
         // Host: the player is back (said hello again).
-        public static void OnHello(int slot, string name)
+        public static void OnHello(int slot, string key)
         {
             if (bot == null)
                 return;
-            if (name == botName)
+            if (key == botKey)
             {
-                Plugin.Log.LogInfo(name + " is back: their stand-in hands over.");
-                handedBack[name] = bot.transform.position;
+                Plugin.Log.LogInfo(botName + " is back: their stand-in hands over.");
+                handedBack[key] = bot.transform.position;
                 Remove(true);
             }
             else if (slot == botSlot)
             {
                 // Someone else took that player's place: the stand-in goes (their gear stays remembered).
-                Plugin.Log.LogInfo(name + " took " + botName + "'s place: the stand-in leaves.");
+                Plugin.Log.LogInfo("Someone else took " + botName + "'s place: the stand-in leaves.");
                 Remove(true);
             }
         }
 
         // Where the returning player's stand-in was (once).
-        public static bool TakeHandBack(string name, out Vector2 at)
+        public static bool TakeHandBack(string key, out Vector2 at)
         {
             at = Vector2.zero;
             Vector2 v;
-            if (!handedBack.TryGetValue(name, out v))
+            if (!handedBack.TryGetValue(key, out v))
                 return false;
-            handedBack.Remove(name);
+            handedBack.Remove(key);
             at = v;
             return true;
         }
@@ -194,7 +196,7 @@ namespace GungeonOnline
             if (who != null)
             {
                 if (remember && geared && !who.healthHaver.IsDead && !who.IsGhost)
-                    InventorySync.Remember(botName, who);
+                    InventorySync.Remember(botKey, who);
                 who.SetInputOverride("stand-in removed");
                 Object.Destroy(who.gameObject);
             }
@@ -412,7 +414,7 @@ namespace GungeonOnline
             if (geared && now >= nextRememberAt && !bot.healthHaver.IsDead && !bot.IsGhost)
             {
                 nextRememberAt = now + 2f;
-                InventorySync.Remember(botName, bot);
+                InventorySync.Remember(botKey, bot);
             }
             // The game may show player 2's HUD again (floor change, co-op events): keep it hidden.
             HideSecondHud();
@@ -425,12 +427,16 @@ namespace GungeonOnline
 
         // ---- The game's co-op rules, adjusted for a bot ----
 
-        // The camera stays on the host (a bot wandering off shouldn't drag the view around).
+        // The camera stays on the host (a bot wandering off shouldn't drag the view around) - while the host is alive.
+        // The camera skips ghosts too, so with the host a ghost it had nobody to follow and showed only black.
         [HarmonyPostfix]
         [HarmonyPatch(typeof(PlayerController), "get_IgnoredByCamera")]
         private static void AfterIgnoredByCamera(PlayerController __instance, ref bool __result)
         {
-            if (bot != null && __instance == bot)
+            if (bot == null || __instance != bot)
+                return;
+            PlayerController host = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+            if (host != null && !host.IsGhost)
                 __result = true;
         }
 

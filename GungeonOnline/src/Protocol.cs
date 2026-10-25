@@ -56,6 +56,9 @@ namespace GungeonOnline
         Roster = 47,      // host -> guests: who is in the game (slot + name of every player)
         RestartRequest = 48, // guest -> host: we pressed Quick Restart; please restart the run
         WalletState = 49, // host -> guests: the shared purse as it is (money, keys); guests set theirs to it
+        KeyItem = 55,     // we got a part of the Bullet That Can Kill The Past (or the Bullet): everyone gets one
+        DuelRequest = 56, // guest -> host: we fired the Gun That Can Kill The Past; start the duel
+        DuelWon = 57,     // host -> guests: the duel's winner (slot, or -1 for nobody)
         EnemyEffect = 54, // one of our bullets put a status effect (freeze, charm, fire...) on an enemy
         Motion = 53,      // our flying bullets that started circling us or spiralling: the copies do the same
         Companions = 52,  // our extra companions (after the first): kind, animation frame, facing, position
@@ -67,7 +70,7 @@ namespace GungeonOnline
     public static class Protocol
     {
         // Bump this whenever the packet format changes, so old and new versions refuse to talk.
-        public const int Version = 46;
+        public const int Version = 48;
         public const int Channel = 0;
         public const int MaxPlayers = 4;
         public const byte NoSlot = 255;   // a guest before the host has given it a slot

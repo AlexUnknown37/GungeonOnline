@@ -12,7 +12,7 @@ namespace GungeonOnline
     // - While one player is a ghost, the next normal chest the living player opens brings them back
     //   (no loot from that chest), right at the chest.
     // - If the last living player dies too, every game shows the death screen. Only the host decides that: it ends
-    //   the run when every player (and a stand-in bot) has been down for a moment. Before, each game decided on its
+    //   the run when every real player has been down for a moment (a stand-in bot left alive doesn't count). Before, each game decided on its
     //   own from its slightly late picture of the others: two players dying at almost the same moment each thought
     //   the other was already a ghost and ended the run for everyone while a third player was still alive.
     // With more than two players: a ghost comes back when any living player opens a chest (every ghost at once).
@@ -109,6 +109,9 @@ namespace GungeonOnline
                 return true;
             if (GameManager.Instance.IsFoyer)
                 return true;
+            // The duel's winner in their own past is alone there: dying fails it, like in the base game.
+            if (DuelSync.InPrivatePast && !DuelSync.Spectating)
+                return true;
 
             // Anyone else in the run: become a ghost and say so. Whether that was the last of us is the host's call
             // (Update), made once everyone's state has arrived - never on our own, possibly out-of-date, view.
@@ -135,16 +138,6 @@ namespace GungeonOnline
                         return true;
                 }
                 return StandIn.Active && StandIn.Player != null;
-            }
-        }
-
-        // Host: is the stand-in bot (if any) down too?
-        private static bool StandInDown
-        {
-            get
-            {
-                PlayerController bot = StandIn.Active ? StandIn.Player : null;
-                return bot == null || bot.IsGhost || bot.healthHaver == null || bot.healthHaver.IsDead;
             }
         }
 
@@ -184,13 +177,15 @@ namespace GungeonOnline
                 allDeadSince = -1f;
                 return;
             }
-            // Online, only the host decides; guests wait for its TeamWiped.
-            if (Connected && (session.Link == null || !session.Link.IsHost))
+            // Online, only the host decides; guests wait for its TeamWiped. Not during the duel ending: the losers are
+            // down and the winner goes to their past, but that's the end of the run, not a game over.
+            if (Connected && (session.Link == null || !session.Link.IsHost) || DuelSync.HoldsRun)
             {
                 allDeadSince = -1f;
                 return;
             }
-            bool othersDown = Connected ? EveryoneElseDownHere && StandInDown : true;
+            // A stand-in bot still alive doesn't keep the run going: alone it may never revive anyone (a softlock).
+            bool othersDown = Connected ? EveryoneElseDownHere : true;
             if (!othersDown)
             {
                 allDeadSince = -1f;
@@ -213,8 +208,8 @@ namespace GungeonOnline
 
         public static void OnTeamWiped()
         {
-            if (session.From != 0)
-                return; // only the host ends the run (an older game may still send this on its own)
+            if (session.From != 0 || DuelSync.InPrivatePast)
+                return; // only the host ends the run (an older game may still send this on its own); never in our past
             Plugin.Log.LogInfo("The host says every player is down: game over.");
             ForceGameOver();
         }
@@ -390,6 +385,33 @@ namespace GungeonOnline
             p.ClearInputOverride("revivepause");
             p.IsCurrentlyCoopReviving = false;
             Plugin.Log.LogInfo("Revive finished: control restored.");
+        }
+
+        // For the log: what hurt a player in our game (helps find friendly fire and odd damage in bug reports).
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(HealthHaver), "ApplyDamage")]
+        private static void LogPlayerHit(HealthHaver __instance, float __0, string __2)
+        {
+            PlayerController p = __instance != null ? __instance.gameActor as PlayerController : null;
+            if (p == null || !Connected || __0 <= 0f || !__instance.IsVulnerable)
+                return;
+            if (EnemySync.RemoteBulletHitting && !session.PvpEnabled && !DuelSync.Active && !BulletSync.TestOldBullets)
+                return; // blocked (BulletSync's safety net): not a hit
+            string from = "";
+            if (string.IsNullOrEmpty(__2))
+            {
+                // No name given: say which game code did it (the first few steps that aren't Harmony's or ours).
+                System.Diagnostics.StackFrame[] frames = new System.Diagnostics.StackTrace(1, false).GetFrames();
+                int shown = 0;
+                for (int i = 0; frames != null && i < frames.Length && shown < 4; i++)
+                {
+                    System.Reflection.MethodBase m = frames[i].GetMethod();
+                    if (m == null || m.DeclaringType == null || m.DeclaringType.Namespace == "GungeonOnline" || m.DeclaringType.Name.StartsWith("Harmony"))
+                        continue;
+                    from += (shown++ > 0 ? " < " : " via ") + m.DeclaringType.Name + "." + m.Name;
+                }
+            }
+            Plugin.Log.LogInfo((p == StandIn.Player ? "Stand-in" : "We") + " got hit for " + __0 + " by '" + (__2 ?? "?") + "'" + from + ".");
         }
 
         // "The best living player" is nobody in a game whose only player is a ghost (local co-op always has someone

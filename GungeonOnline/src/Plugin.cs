@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.122.0";
+        public const string ModVersion = "0.153.0";
 
         public static ManualLogSource Log;
 
@@ -46,6 +46,11 @@ namespace GungeonOnline
             Log = Logger;
             SessionLog.Start();
             FreezeWatch.Start();
+            string lanTest;
+            if (LanLink.SelfTest(out lanTest))
+                Log.LogInfo("LAN delivery self-test: ok.");
+            else
+                Log.LogError("LAN delivery self-test FAILED: " + lanTest);
             PlayerName = Config.Bind("General", "PlayerName", "",
                 "Name other players see. Leave empty to use your Steam name.");
             toggleWindowKey = Config.Bind("General", "ToggleWindowKey", KeyCode.F8,
@@ -110,6 +115,8 @@ namespace GungeonOnline
             CompanionSync.Init(session);
             GenerationSeed.Init(session, harmony);
             EffectSync.Init(session, harmony);
+            KeyItemSync.Init(session, harmony);
+            DuelSync.Init(session, harmony);
             ThrowSync.Init(session, harmony);
             BlankSync.Init(session, harmony);
             MenuButtons.Init(harmony);
@@ -229,6 +236,8 @@ namespace GungeonOnline
                     + ", hitbox " + (me.specRigidbody != null && me.specRigidbody.HitboxPixelCollider != null && me.specRigidbody.HitboxPixelCollider.Enabled)
                     + ", collides " + (me.specRigidbody != null && me.specRigidbody.CollideWithOthers));
                 Log.LogInfo("Test: " + InventorySync.DescribeGuns(me));
+                Log.LogInfo("Test: standing at " + me.transform.position.x.ToString("0.0") + ", " + me.transform.position.y.ToString("0.0")
+                    + " in " + (me.CurrentRoom != null ? me.CurrentRoom.GetRoomName() : "no room") + ".");
                 FlippableCover t = testTable != null ? testTable : NearestTable(me, true);
                 if (t != null)
                     Log.LogInfo("Test: table '" + t.name + "' transform " + t.transform.position + ", body " + (t.specRigidbody != null
@@ -243,6 +252,95 @@ namespace GungeonOnline
                 bool host = session.Link == null || session.Link.IsHost;
                 Log.LogInfo("Test: taking the exit" + (host ? "." : " in 2 s."));
                 GameManager.Instance.DelayedLoadNextLevel(host ? 0.5f : 2f);
+                return;
+            }
+            // U: get the Stinger and the Shell and let the bot take turns with our guns.
+            if (Input.GetKeyDown(KeyCode.U) && !GameManager.Instance.IsFoyer)
+            {
+                foreach (int id in new int[] { 512 })
+                {
+                    Gun g = PickupObjectDatabase.GetById(id) as Gun;
+                    if (g != null) me.inventory.AddGunToInventory(g, false);
+                }
+                foreach (PickupObject o in PickupObjectDatabase.Instance.Objects)
+                {
+                    Gun g = o as Gun;
+                    if (g != null && g.EncounterNameOrDisplayName == "Stinger")
+                    {
+                        me.inventory.AddGunToInventory(g, true);
+                        break;
+                    }
+                }
+                Autopilot.GunTour = true;
+                Log.LogInfo("Test: got the Stinger and the Shell (gun tour on).");
+                return;
+            }
+            // V: switch the old "bot's room counts as the host's" rule on/off (to compare).
+            if (Input.GetKeyDown(KeyCode.V))
+            {
+                EnemySync.TestOldBotRule = !EnemySync.TestOldBotRule;
+                Log.LogInfo("Test: old bot room rule " + (EnemySync.TestOldBotRule ? "ON (old behaviour)." : "off."));
+                return;
+            }
+            // Z: switch copied bullets' friendly-fire fixes off/on (to compare).
+            if (Input.GetKeyDown(KeyCode.Z))
+            {
+                BulletSync.TestOldBullets = !BulletSync.TestOldBullets;
+                Log.LogInfo("Test: copied bullets' friendly-fire fixes " + (BulletSync.TestOldBullets ? "OFF (old behaviour)." : "ON."));
+                return;
+            }
+            // T: another player's Shell shot, copied, fired at us (Shift+T: the Stinger).
+            if (Input.GetKeyDown(KeyCode.T) && !GameManager.Instance.IsFoyer)
+            {
+                BulletSync.TestCopiedShot(me, Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift) ? "Stinger" : "Shell",
+                    Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl));
+                return;
+            }
+            // 7: list what's in our room (names, positions, scripts) and the duel script's settings.
+            if (Input.GetKeyDown(KeyCode.Alpha7) && me.CurrentRoom != null)
+            {
+                Dungeonator.RoomHandler room = me.CurrentRoom;
+                Log.LogInfo("Test: room " + room.GetRoomName() + " from " + room.area.basePosition + " size " + room.area.dimensions + "; we stand at " + me.transform.position);
+                foreach (MonoBehaviour b in FindObjectsOfType<MonoBehaviour>())
+                {
+                    if (b == null || b is PlayerController || b.GetType().Namespace == "GungeonOnline")
+                        continue;
+                    Vector2 p = b.transform.position;
+                    if (!room.ContainsPosition(new IntVector2(Mathf.FloorToInt(p.x), Mathf.FloorToInt(p.y))))
+                        continue;
+                    string t = b.GetType().Name;
+                    if (t.StartsWith("tk2d") || t.StartsWith("Speculative") || t.StartsWith("Ak") || t == "SpriteOutlineManager")
+                        continue;
+                    Log.LogInfo("Test:   " + b.name + " [" + t + "] at " + p.x.ToString("0.0") + ", " + p.y.ToString("0.0"));
+                }
+                CoopPastController duel = FindObjectOfType<CoopPastController>();
+                if (duel != null)
+                    foreach (System.Reflection.FieldInfo f in typeof(CoopPastController).GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic))
+                    {
+                        object v = f.GetValue(duel);
+                        Component c = v as Component;
+                        Log.LogInfo("Test:   duel." + f.Name + " = " + (c != null ? c.name + " at " + c.transform.position : v));
+                    }
+                return;
+            }
+            // 8: get a Prime Primer (an end-game part: every player should get one too).
+            if (Input.GetKeyDown(KeyCode.Alpha8) && !GameManager.Instance.IsFoyer)
+            {
+                Log.LogInfo("Test: getting a Prime Primer.");
+                LootEngine.GivePrefabToPlayer(PickupObjectDatabase.GetById(348).gameObject, me);
+                return;
+            }
+            // 0: as if we fired the Gun That Can Kill The Past at our own past (starts the duel online).
+            if (Input.GetKeyDown(KeyCode.Alpha0) && !GameManager.Instance.IsFoyer)
+            {
+                Log.LogInfo("Test: firing the Gun That Can Kill The Past.");
+                GameManager.Instance.LoadCustomLevel("fs_pilot");
+                return;
+            }
+            // Y: another player's Bomb lands at our feet (Shift+Y: a Molotov).
+            if (Input.GetKeyDown(KeyCode.Y) && !GameManager.Instance.IsFoyer)
+            {
+                ThrowSync.TestCopiedThrow(me, Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift) ? "Molotov" : "Bomb");
                 return;
             }
             // O: lock the game up for 15 s (checks that FreezeWatch reports it).
@@ -506,6 +604,8 @@ namespace GungeonOnline
             { long __m = AllocProfiler.Begin(); WorldSync.Update(); AllocProfiler.End("WorldSync.Update", __m); }
             { long __m = AllocProfiler.Begin(); EnemySync.Update(); AllocProfiler.End("EnemySync.Update", __m); }
             AttackSync.Update();
+            DuelSync.Update();
+            ThrowSync.Update();
             CompanionSync.Update();
             NetStats.Update(session.Status == NetSession.State.Connected);
             if (testMode)

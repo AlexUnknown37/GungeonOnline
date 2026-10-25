@@ -359,28 +359,42 @@ namespace GungeonOnline
             get { return GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null; }
         }
 
+        // Which player number our game is in this room as: our own player's, or (host) the stand-in bot's - the
+        // number the other games see the bot under. -1: we're not in it.
+        private static int OurSlotIn(RoomHandler room)
+        {
+            PlayerController me = Me;
+            if (room == null)
+                return -1;
+            if (me != null && !LocalIsGhost && !DuelSync.Spectating && me.CurrentRoom == room)
+                return session.LocalSlot;
+            PlayerController bot = StandIn.Active ? StandIn.Player : null;
+            if (bot != null && !bot.IsGhost && bot.healthHaver != null && !bot.healthHaver.IsDead && bot.CurrentRoom == room)
+                return TestOldBotRule ? session.LocalSlot : StandIn.Slot;
+            return -1;
+        }
+
+        // Test copies (V): the old rule, where the bot's room counted under the host's own number.
+        public static bool TestOldBotRule;
+
         // Are we in charge of this room's enemies?
         private static bool InCharge(RoomHandler room)
         {
-            PlayerController me = Me;
-            if (me != null && !LocalIsGhost && room != null && me.CurrentRoom == room)
-                return true;
-            // The host's game also runs a stand-in bot: where it fights alone, the host's game is in charge.
-            PlayerController bot = StandIn.Active ? StandIn.Player : null;
-            return room != null && bot != null && !bot.IsGhost && bot.healthHaver != null && !bot.healthHaver.IsDead
-                && bot.CurrentRoom == room;
+            return OurSlotIn(room) >= 0;
         }
 
         // Is a player with a lower number (the host first) alive in this room too? Then their game reports its
-        // enemies and ours doesn't, so the other games don't get two different reports.
+        // enemies and ours doesn't, so the other games don't get two different reports. Where only the host's bot
+        // is, it counts under the bot's number, as the other games see it (counting as the host made both the host
+        // and a lower-numbered guest in that room send).
         private static bool LowerPlayerInRoom(RoomHandler room)
         {
             if (room == null || GameManager.Instance.Dungeon == null)
                 return false;
-            int level = LevelSync.CurrentLevelCode();
+            int ours = OurSlotIn(room);
             foreach (RemotePlayerState p in session.Remotes)
             {
-                if (p.Slot >= session.LocalSlot || !p.HasPlayer || p.IsDead || p.Scene != LevelSync.CurrentLevelKey())
+                if (p.Slot >= ours || !p.HasPlayer || p.IsDead || p.Scene != LevelSync.CurrentLevelKey())
                     continue;
                 Vector2 f = p.FeetPosition;
                 RoomHandler theirs = GameManager.Instance.Dungeon.data.GetAbsoluteRoomFromPosition(
@@ -418,6 +432,7 @@ namespace GungeonOnline
             }
 
             ApplyCorrections();
+            ReportBothLead(now);
             UnsealIfStuck(now);
             KeepClearedRoomOpen(now);
             SendClearedRoomsToArrivals();
@@ -459,6 +474,24 @@ namespace GungeonOnline
             });
         }
 
+        // Enemy updates from each player for rooms we lead ourselves, reported once a minute.
+        private static readonly int[] bothLead = new int[Protocol.MaxPlayers];
+        private static float nextBothLeadReportAt;
+
+        private static void ReportBothLead(float now)
+        {
+            if (now < nextBothLeadReportAt)
+                return;
+            nextBothLeadReportAt = now + 60f;
+            for (int i = 0; i < bothLead.Length; i++)
+            {
+                if (bothLead[i] > 0)
+                    Plugin.Log.LogInfo("Enemy updates from player " + (i + 1) + " for rooms we lead in the last minute: " + bothLead[i]
+                        + " (two games leading one room; a few at doors are normal).");
+                bothLead[i] = 0;
+            }
+        }
+
         public static void OnEnemyStates(BinaryReader r)
         {
             int level = r.ReadInt32();
@@ -483,10 +516,13 @@ namespace GungeonOnline
                 // alone rather than drag the wrong enemy around.
                 if (KindHash(a.EnemyGuid) != theirKind)
                     continue;
-                // If we are alive in that room too, the lower player number wins (the host first); otherwise the
-                // sender is in charge.
-                if (InCharge(a.ParentRoom) && session.LocalSlot < session.From)
+                // We lead that room ourselves (the lowest number in it): our copy is the one that counts. The sender
+                // thinks so too, so two games lead one room (briefly at a door is normal): counted for the log.
+                if (LeadsEnemy(a))
+                {
+                    bothLead[Mathf.Clamp(session.From, 0, bothLead.Length - 1)]++;
                     continue;
+                }
 
                 // Health only ever goes down to theirs (our own hits may not have reached them yet).
                 if (theirHealth < a.healthHaver.GetCurrentHealth())
@@ -516,8 +552,10 @@ namespace GungeonOnline
             foreach (KeyValuePair<AIActor, Correction> pair in corrections)
             {
                 AIActor a = pair.Key;
+                // Also as soon as we lead it ourselves (the last sender left, died...): it walks on its own at once
+                // instead of heading for that sender's last report until it times out.
                 if (a == null || a.healthHaver == null || a.healthHaver.IsDead || a.specRigidbody == null
-                    || now - pair.Value.ReceivedAt > 0.5f)
+                    || now - pair.Value.ReceivedAt > 0.5f || LeadsEnemy(a))
                 {
                     if (done == null) done = new List<AIActor>();
                     done.Add(a);

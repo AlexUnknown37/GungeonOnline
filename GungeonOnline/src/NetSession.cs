@@ -12,6 +12,9 @@ namespace GungeonOnline
     {
         public int Slot;              // 0 = host, 1-3 = guests
         public string Name = "";
+        // Who this is, to tell players apart across reconnects: their Steam ID and name, or just their name without
+        // Steam (two friends can have the same Steam name).
+        public string Key = "";
         public bool Connected;        // in the game right now (host: said hello; guest: on the host's roster)
         public float PingMs = -1f;    // only for players we talk to directly (host <-> guests)
         public float LastHeard;       // host: when this guest's last packet arrived (for timeouts)
@@ -70,6 +73,7 @@ namespace GungeonOnline
         {
             Connected = false;
             Name = "";
+            Key = "";
             PingMs = -1f;
             HasPlayer = false;
             IsDead = false;
@@ -141,6 +145,12 @@ namespace GungeonOnline
         public string PeerName
         {
             get { return Remote.Name; }
+        }
+
+        // The sender's lasting identity (see RemotePlayerState.Key).
+        public string PeerKey
+        {
+            get { return Remote.Key.Length > 0 ? Remote.Key : Remote.Name; }
         }
 
         // Ping to the host (guest), or the worst ping among the guests (host).
@@ -427,6 +437,32 @@ namespace GungeonOnline
                 case MsgType.AtExit:
                 case MsgType.RestartRequest:
                 case MsgType.Wallet:          // guests' purse changes go to the host, which sends everyone the total
+                case MsgType.DuelRequest:
+                    return true;
+            }
+            return false;
+        }
+
+        // Orders only the host gives (guests act on them): never relayed, and guests ignore them from anyone else.
+        private static bool HostAuthority(MsgType type)
+        {
+            switch (type)
+            {
+                case MsgType.LevelLoad:
+                case MsgType.ReturnToFoyer:
+                case MsgType.EndRun:
+                case MsgType.Rules:
+                case MsgType.TeamWiped:
+                case MsgType.LoopState:
+                case MsgType.LoopStart:
+                case MsgType.Progress:
+                case MsgType.ModSettings:
+                case MsgType.Roster:
+                case MsgType.RejoinOffer:
+                case MsgType.InventoryRestore:
+                case MsgType.FloorPrint:
+                case MsgType.WalletState:
+                case MsgType.DuelWon:
                     return true;
             }
             return false;
@@ -466,8 +502,9 @@ namespace GungeonOnline
                 from = linkSlot;
                 data[offset + 1] = (byte)linkSlot;
                 Players[from].LastHeard = arrived;
-                // Pass it on to the other guests (only once that guest has said hello).
-                if (Players[from].Connected && !HostOnly(type))
+                // Pass it on to the other guests (only once that guest has said hello). Orders only the host gives
+                // are never passed on: a guest could otherwise load levels or end runs for everyone.
+                if (Players[from].Connected && !HostOnly(type) && !HostAuthority(type))
                 {
                     byte[] copy = new byte[length];
                     Buffer.BlockCopy(data, offset, copy, 0, length);
@@ -499,6 +536,8 @@ namespace GungeonOnline
                 from = data[offset + 1];
                 if (from >= Players.Length || from == LocalSlot)
                     return;
+                if (from != 0 && HostAuthority(type))
+                    return; // only the host gives these orders
             }
 
             // One reusable reader for incoming messages (a new one per message made a lot of garbage).
@@ -537,6 +576,9 @@ namespace GungeonOnline
                         string name = r.ReadString();
                         byte yourSlot = r.ReadByte();
                         bool pleaseIntroduce = r.ReadBoolean();
+                        string key = r.ReadString();
+                        if (key.Length == 0)
+                            key = name;
                         if (version != Protocol.Version)
                         {
                             Plugin.Log.LogError(name + " runs protocol " + version + ", we run " + Protocol.Version + ".");
@@ -546,8 +588,9 @@ namespace GungeonOnline
                         if (Link.IsHost)
                         {
                             bool isNew = !Players[from].Connected;
-                            StandIn.OnHello(from, name);
+                            StandIn.OnHello(from, key);
                             Players[from].Name = name;
+                            Players[from].Key = key;
                             Players[from].Connected = true;
                             Players[from].LastHeard = Time.realtimeSinceStartup;
                             RebuildRemotes();
@@ -753,6 +796,17 @@ namespace GungeonOnline
                     case MsgType.EnemyEffect:
                         EffectSync.OnEnemyEffect(r);
                         break;
+                    case MsgType.KeyItem:
+                        KeyItemSync.OnKeyItem(r);
+                        break;
+                    case MsgType.DuelRequest:
+                        if (Link.IsHost)
+                            DuelSync.OnDuelRequest();
+                        break;
+                    case MsgType.DuelWon:
+                        if (!Link.IsHost)
+                            DuelSync.OnDuelWon(r);
+                        break;
                     case MsgType.LoopStart:
                         if (!Link.IsHost)
                             LoopSync.OnLoopStart(r);
@@ -876,6 +930,8 @@ namespace GungeonOnline
                 w.Write(myName);
                 w.Write(slotForThem);
                 w.Write(askBack);
+                // Steam ID + name: friends with the same name differ by ID, two copies on one account by name.
+                w.Write(SteamManager.Initialized ? Steamworks.SteamUser.GetSteamID().m_SteamID + "/" + myName : "");
             }), true);
         }
 
@@ -1313,6 +1369,7 @@ namespace GungeonOnline
                     return;
                 bool wasThere = Players[slot].Connected;
                 string name = Players[slot].Name;
+                string key = Players[slot].Key.Length > 0 ? Players[slot].Key : name;
                 // What we last knew of them (where they stood), for their stand-in.
                 RemotePlayerState last = new RemotePlayerState();
                 last.HasPlayer = Players[slot].HasPlayer;
@@ -1327,7 +1384,7 @@ namespace GungeonOnline
                     return;
                 Plugin.Log.LogWarning("Player " + (slot + 1) + " (" + name + ") disconnected: " + reason);
                 Toast.Show(name + " left the game.", 4f);
-                StandIn.OnGuestLeft(slot, name, last);
+                StandIn.OnGuestLeft(slot, name, key, last);
                 SendRoster();
                 // The host keeps its lobby / port open so friends can come (back). Mid-run the seed stays, so a
                 // player who comes back finds the same run (and their remembered gear).

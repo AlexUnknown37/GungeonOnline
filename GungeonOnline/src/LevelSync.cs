@@ -418,6 +418,11 @@ namespace GungeonOnline
             // LoadNextLevel calls this itself for injected levels; that was already reported.
             if (insideLoadNextLevel)
                 return true;
+            // The ending online: a past becomes the duel; the duel's winner then loads their own past alone.
+            if (DuelSync.RedirectPast(__instance, custom))
+                return false;
+            if (DuelSync.TakePrivateLoad())
+                return true;
             bool startingRun = __instance.IsFoyer || departedFoyer || continuingSavedRun;
             if (IsConnectedJoiner() && !insideFoyerReturn)
             {
@@ -658,7 +663,7 @@ namespace GungeonOnline
             hostLevel.Index = levelIndex;
             hostLevel.Custom = customLevel;
 
-            if (!follow || !GameManager.HasInstance)
+            if (!follow || !GameManager.HasInstance || DuelSync.InPrivatePast)
                 return;
             GameManager gm = GameManager.Instance;
             if (gm.PrimaryPlayer == null)
@@ -753,7 +758,7 @@ namespace GungeonOnline
         // FloorCheck: our floor doesn't match the host's; load the host's floor again. False if we can't now.
         public static bool ReloadHostFloor()
         {
-            if (!IsConnectedJoiner() || hostLevel == null || !GameManager.HasInstance)
+            if (!IsConnectedJoiner() || hostLevel == null || !GameManager.HasInstance || DuelSync.InPrivatePast)
                 return false;
             GameManager gm = GameManager.Instance;
             if (gm.IsLoadingLevel || gm.IsFoyer || gm.PrimaryPlayer == null || OnDeathScreen)
@@ -786,7 +791,7 @@ namespace GungeonOnline
         {
             hostLevel = null;
             ourLevel = null;
-            if (!GameManager.HasInstance || GameManager.Instance.IsFoyer || OnDeathScreen)
+            if (!GameManager.HasInstance || GameManager.Instance.IsFoyer || OnDeathScreen || DuelSync.InPrivatePast)
                 return;
             Plugin.Log.LogInfo("Host returned to the Breach; following.");
             // Done from Update once no other load is running (two loads at once hang the game).
@@ -797,7 +802,7 @@ namespace GungeonOnline
         {
             hostLevel = null;
             ourLevel = null;
-            if (!GameManager.HasInstance || GameManager.Instance.IsFoyer)
+            if (!GameManager.HasInstance || GameManager.Instance.IsFoyer || DuelSync.InPrivatePast)
                 return;
             if (!WaitingForHost && (OnDeathScreen || DeathPageUp()))
             {

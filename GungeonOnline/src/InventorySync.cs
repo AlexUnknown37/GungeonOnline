@@ -209,7 +209,7 @@ namespace GungeonOnline
                 return;
             GameManager gm = GameManager.Instance;
             Snapshot s;
-            if (gm.IsFoyer || gm.CurrentRunSeed == 0 || !remembered.TryGetValue(session.PeerName ?? "", out s) || s.Seed != gm.CurrentRunSeed)
+            if (gm.IsFoyer || gm.CurrentRunSeed == 0 || !remembered.TryGetValue(session.PeerKey, out s) || s.Seed != gm.CurrentRunSeed)
                 return;
             string character = s.Character;
             Plugin.Log.LogInfo(session.PeerName + " is back: offering their place in the run as " + character + ".");
@@ -234,7 +234,7 @@ namespace GungeonOnline
             GameManager g0 = GameManager.HasInstance ? GameManager.Instance : null;
             if (g0 != null && !g0.IsFoyer)
                 breachVisitHandled = false;
-            else if (g0 != null && !breachVisitHandled && rejoinCharacter == null && myRunCharacter != null
+            else if (g0 != null && Foyer.Instance != null && Object.FindObjectOfType<CoopPastController>() == null && !breachVisitHandled && rejoinCharacter == null && myRunCharacter != null
                 && LevelSync.HostInRun && LevelSync.HostRunSeed == myRunSeed)
             {
                 breachVisitHandled = true;
@@ -355,7 +355,7 @@ namespace GungeonOnline
         public static void OnInventory(BinaryReader r)
         {
             Snapshot s = Snapshot.Read(r);
-            remembered[session.PeerName ?? ""] = s;
+            remembered[session.PeerKey] = s;
         }
 
         // Host: the joiner is back on our run and asks for its items.
@@ -363,7 +363,7 @@ namespace GungeonOnline
         {
             int seed = r.ReadInt32();
             Snapshot s;
-            if (!remembered.TryGetValue(session.PeerName ?? "", out s) || s.Seed != seed || !GameManager.HasInstance
+            if (!remembered.TryGetValue(session.PeerKey, out s) || s.Seed != seed || !GameManager.HasInstance
                 || GameManager.Instance.CurrentRunSeed != seed)
             {
                 // Nothing to give back: say so, so the joiner stops waiting.
@@ -371,7 +371,7 @@ namespace GungeonOnline
                 return;
             }
             Vector2 at;
-            bool hadStandIn = StandIn.TakeHandBack(session.PeerName ?? "", out at);
+            bool hadStandIn = StandIn.TakeHandBack(session.PeerKey, out at);
             Plugin.Log.LogInfo(session.PeerName + " rejoined our run: sending back their items" + (hadStandIn ? " (their stand-in's)." : "."));
             session.SendReliableTo(session.From, MsgType.InventoryRestore, delegate (BinaryWriter w)
             {

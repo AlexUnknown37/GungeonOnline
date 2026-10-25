@@ -31,6 +31,7 @@ namespace GungeonOnline
         {
             session = netSession;
             harmony.PatchAll(typeof(BulletSync));
+            PatchBees(harmony);
         }
 
         [HarmonyPostfix]
@@ -130,6 +131,56 @@ namespace GungeonOnline
 
         // The partner's copied bullets: their damage to enemies comes over the network (EnemySync) instead.
         private static readonly HashSet<Projectile> remoteProjectiles = new HashSet<Projectile>();
+
+        // ---- Bullets that bullets make ----
+        // Some bullets make more bullets (the Shell's little gun that shoots, splitting and flak bullets...). In the
+        // shooter's game those belong to the shooter and are sent to everyone as copies of their own. Our copy of
+        // the first bullet made them a second time here, belonging to nobody - and a bullet belonging to no player
+        // is an enemy's: it hit players, PvP or not. A copy makes none; the shooter's copies arrive instead.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(SpawnProjModifier), "SpawnProjectile")]
+        private static bool BeforeBulletSpawnsBullet(SpawnProjModifier __instance)
+        {
+            Projectile parent = __instance != null ? __instance.GetComponent<Projectile>() : null;
+            return TestOldBullets || parent == null || !remoteProjectiles.Contains(parent);
+        }
+
+        // Bees (Stinger, Bee Hive...) go for enemies when they belong to a player, and for players otherwise. A
+        // copied bee belongs to nobody here, so it chased (and stung) the other players. While it picks a target it
+        // counts as ours, so it picks an enemy; the sting itself still does nothing here (the shooter's game deals it).
+        private static readonly System.Type beeSearch = AccessTools.Inner(typeof(BeeProjectile), "<FindTarget>c__Iterator0");
+        private static readonly FieldInfo beeOfSearch = beeSearch != null ? AccessTools.Field(beeSearch, "$this") : null;
+
+        public static void PatchBees(Harmony harmony)
+        {
+            MethodInfo step = beeSearch != null ? AccessTools.Method(beeSearch, "MoveNext") : null;
+            if (step == null || beeOfSearch == null)
+            {
+                Plugin.Log.LogWarning("Couldn't find how bees pick targets; other players' bees may chase players.");
+                return;
+            }
+            harmony.Patch(step, prefix: new HarmonyMethod(typeof(BulletSync), "BeforeBeeSearch"),
+                finalizer: new HarmonyMethod(typeof(BulletSync), "AfterBeeSearch"));
+        }
+
+        private static void BeforeBeeSearch(object __instance, out Projectile __state)
+        {
+            __state = null;
+            Projectile bee = beeOfSearch.GetValue(__instance) as Projectile;
+            PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+            if (!TestOldBullets && bee != null && me != null && remoteProjectiles.Contains(bee) && bee.Owner == null)
+            {
+                ownerField.SetValue(bee, me);
+                __state = bee;
+            }
+        }
+
+        private static System.Exception AfterBeeSearch(System.Exception __exception, Projectile __state)
+        {
+            if (__state != null)
+                ownerField.SetValue(__state, null);
+            return __exception;
+        }
 
         // ---- Steered bullets (guided rockets, homing, bouncing...) ----
         // A copied bullet flies straight from where it was fired. Bullets of ours that changed course since (the
@@ -328,6 +379,25 @@ namespace GungeonOnline
             EnemySync.RemoteBulletHitting = remote;
             EnemySync.LocalBulletHitting = !remote;
         }
+
+        // Safety net for any gun: without PvP, another player's copied bullet never hurts a player here, however it
+        // got to hit (a gun's odd bullets, bullets made by bullets, bees...). The fixes above keep copies from aiming at
+        // or touching players; this catches whatever slips past them.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(HealthHaver), "ApplyDamage")]
+        private static bool BeforePlayerHurt(HealthHaver __instance)
+        {
+            if (!EnemySync.RemoteBulletHitting || TestOldBullets || session == null || session.PvpEnabled || DuelSync.Active
+                || !(__instance.gameActor is PlayerController))
+                return true;
+            if (Time.realtimeSinceStartup >= nextBlockedLogAt)
+            {
+                nextBlockedLogAt = Time.realtimeSinceStartup + 5f;
+                Plugin.Log.LogInfo("Blocked a hit on a player from another player's bullet (PvP is off).");
+            }
+            return false;
+        }
+        private static float nextBlockedLogAt;
 
         [HarmonyPostfix]
         [HarmonyPatch(typeof(Projectile), "HandleDamage")]
@@ -540,8 +610,10 @@ namespace GungeonOnline
             ownerField.SetValue(p, null);
             shooterField.SetValue(p, null);
             // PvP (host setting): the partner's bullets can hit us, like an enemy's.
-            p.collidesWithPlayer = session.PvpEnabled;
+            p.collidesWithPlayer = session.PvpEnabled || DuelSync.Active;
             p.collidesWithEnemies = true;
+            if (!session.PvpEnabled && !DuelSync.Active)
+                SpareTeammates(p);
             p.baseData.speed = speed;
             p.baseData.damage = damage;
             p.baseData.range = range;
@@ -562,6 +634,134 @@ namespace GungeonOnline
                 remoteProjectiles.Remove(p);
                 p.DieInAir(true, false, false, false);
             }
+        }
+
+        // A player's own explosions (rockets, explosive shells...) spare every player: the game adds all players to
+        // the explosion's ignore list when the bullet's owner is a player. Our copies of other players' bullets have
+        // no owner here (so they don't trigger our items), and their explosions hurt everyone, PvP or not. So without
+        // PvP, every explosion a copy carries spares the players, like the real bullet does in its owner's game.
+        private static readonly Dictionary<System.Type, FieldInfo[]> explosionFields = new Dictionary<System.Type, FieldInfo[]>();
+
+        // Test copies (Z): the copies' old behaviour, to compare.
+        public static bool TestOldBullets;
+
+        public static void SpareTeammates(Projectile p)
+        {
+            SpareTeammatesIn(p.gameObject);
+        }
+
+        // The same for anything another player's copy spawned here (thrown grenades, mines...).
+        public static void SpareTeammatesIn(GameObject go)
+        {
+            if (!GameManager.HasInstance || TestOldBullets || go == null)
+                return;
+            foreach (MonoBehaviour b in go.GetComponentsInChildren<MonoBehaviour>(true))
+            {
+                if (b == null)
+                    continue;
+                FieldInfo[] fields;
+                System.Type t = b.GetType();
+                if (!explosionFields.TryGetValue(t, out fields))
+                {
+                    List<FieldInfo> list = new List<FieldInfo>();
+                    foreach (FieldInfo f in t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                    {
+                        if (f.FieldType == typeof(ExplosionData))
+                            list.Add(f);
+                    }
+                    fields = list.ToArray();
+                    explosionFields[t] = fields;
+                }
+                foreach (FieldInfo f in fields)
+                {
+                    ExplosionData data = f.GetValue(b) as ExplosionData;
+                    if (data == null)
+                        continue;
+                    if (data.ignoreList == null)
+                        data.ignoreList = new List<SpeculativeRigidbody>();
+                    foreach (PlayerController player in GameManager.Instance.AllPlayers)
+                    {
+                        if (player != null && player.specRigidbody != null && !data.ignoreList.Contains(player.specRigidbody))
+                            data.ignoreList.Add(player.specRigidbody);
+                    }
+                }
+            }
+        }
+
+        // A bullet another player's copied item made here (a thrown item that flies like a bullet): treated like their
+        // copied shots (it hurts no player without PvP; its damage to enemies comes from their game).
+        public static void TreatAsCopy(Projectile p)
+        {
+            if (p == null || session == null)
+                return;
+            remoteProjectiles.Add(p);
+            ownerField.SetValue(p, null);
+            shooterField.SetValue(p, null);
+            p.collidesWithPlayer = session.PvpEnabled || DuelSync.Active;
+            if (!session.PvpEnabled && !DuelSync.Active)
+                SpareTeammates(p);
+        }
+
+        // Test (T / Shift+T): another player's Shell (or Stinger) shot, copied here exactly like a real one, fired
+        // at us from 4 tiles away.
+        public static void TestCopiedShot(PlayerController me, string gunName, bool forceTouch = false)
+        {
+            Gun gun = null;
+            foreach (PickupObject o in PickupObjectDatabase.Instance.Objects)
+            {
+                Gun g = o as Gun;
+                if (g != null && g.EncounterNameOrDisplayName == gunName && g.DefaultModule != null && g.DefaultModule.projectiles.Count > 0)
+                {
+                    gun = g;
+                    break;
+                }
+            }
+            if (gun == null)
+            {
+                Plugin.Log.LogInfo("Test: no gun called " + gunName + ".");
+                return;
+            }
+            Projectile prefab = gun.DefaultModule.projectiles[0];
+            string parts = "";
+            foreach (MonoBehaviour b in prefab.GetComponents<MonoBehaviour>())
+                if (b != null) parts += b.GetType().Name + " ";
+            // Aim through us at the nearest wall behind us, so what it makes on impact (bees...) starts right here.
+            Vector2 dir = Vector2.right;
+            float best = float.MaxValue;
+            Dungeonator.DungeonData data = GameManager.Instance.Dungeon.data;
+            foreach (Vector2 d in new Vector2[] { Vector2.right, Vector2.left, Vector2.up, Vector2.down })
+            {
+                for (int step = 1; step <= 30; step++)
+                {
+                    IntVector2 c = (me.CenterPosition + d * step).ToIntVector2(VectorConversions.Floor);
+                    if (data.CheckInBoundsAndValid(c) && data[c].type == Dungeonator.CellType.WALL)
+                    {
+                        if (step < best) { best = step; dir = d; }
+                        break;
+                    }
+                }
+            }
+            Vector2 from = me.CenterPosition - dir * 4f;
+            // An enemy 2 tiles behind us in the line of fire: bullets make their extras when they hit one.
+            AIActor kin = EnemyDatabase.GetOrLoadByGuid("01972dee89fc4404a5c408d50007dad5");
+            if (kin != null)
+                AIActor.Spawn(kin, (me.CenterPosition + dir * 2f).ToIntVector2(VectorConversions.Floor), me.CurrentRoom, true,
+                    AIActor.AwakenAnimationType.Default, true);
+            GameObject spawned;
+            spawningRemote = true;
+            try { spawned = SpawnManager.SpawnProjectile(prefab.gameObject, from, Quaternion.identity, true); }
+            finally { spawningRemote = false; }
+            Projectile p = spawned.GetComponent<Projectile>();
+            remoteProjectiles.Add(p);
+            ownerField.SetValue(p, null);
+            shooterField.SetValue(p, null);
+            p.collidesWithPlayer = session.PvpEnabled || DuelSync.Active || forceTouch; // forceTouch: as if it slipped past
+            p.collidesWithEnemies = true;
+            if (!session.PvpEnabled && !DuelSync.Active)
+                SpareTeammates(p);
+            Plugin.Log.LogInfo((forceTouch ? "Test: (forced to touch players) " : "") + "Test: a copied " + gunName + " shot (" + prefab.name + ": " + parts + ") fired through us at a wall "
+                + best + " tiles behind.");
+            p.SendInDirection(dir, true, true);
         }
 
         // Bullet types by the code of their name (shots send the code, not the name).
