@@ -1,6 +1,6 @@
 {
   "name": "Gungeon_Online",
-  "version_number": "0.153.0",
+  "version_number": "0.161.0",
   "website_url": "https://github.com/AlexUnknown37/GungeonOnline",
   "description": "Online co-op for up to 4 players over Steam or LAN. Shared runs, enemies, loot, ghosts and revives; bots take over for players who drop out; Loop The Gungeon support. Very early alpha.",
   "dependencies": [

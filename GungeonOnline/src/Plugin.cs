@@ -15,7 +15,7 @@ namespace GungeonOnline
     {
         public const string Guid = "gungeononline.multiplayer";
         public const string Name = "Gungeon Online";
-        public const string ModVersion = "0.153.0";
+        public const string ModVersion = "0.161.0";
 
         public static ManualLogSource Log;
 
@@ -91,6 +91,8 @@ namespace GungeonOnline
                     testStart = args[i + 1].Trim();
                 if (args[i] == "--gungeon-online-test-run")
                     testRunCharacter = args[i + 1].Trim();
+                if (args[i] == "--gungeon-online-lag")
+                    int.TryParse(args[i + 1], out LanLink.TestLagMs);
             }
             for (int i = 0; i < args.Length; i++)
             {
@@ -116,6 +118,7 @@ namespace GungeonOnline
             GenerationSeed.Init(session, harmony);
             EffectSync.Init(session, harmony);
             KeyItemSync.Init(session, harmony);
+            GameModeSync.Init(session);
             DuelSync.Init(session, harmony);
             ThrowSync.Init(session, harmony);
             BlankSync.Init(session, harmony);
@@ -236,6 +239,7 @@ namespace GungeonOnline
                     + ", hitbox " + (me.specRigidbody != null && me.specRigidbody.HitboxPixelCollider != null && me.specRigidbody.HitboxPixelCollider.Enabled)
                     + ", collides " + (me.specRigidbody != null && me.specRigidbody.CollideWithOthers));
                 Log.LogInfo("Test: " + InventorySync.DescribeGuns(me));
+                Log.LogInfo("Test: player number " + me.PlayerIDX + ", primary " + me.IsPrimaryPlayer + ".");
                 Log.LogInfo("Test: standing at " + me.transform.position.x.ToString("0.0") + ", " + me.transform.position.y.ToString("0.0")
                     + " in " + (me.CurrentRoom != null ? me.CurrentRoom.GetRoomName() : "no room") + ".");
                 FlippableCover t = testTable != null ? testTable : NearestTable(me, true);
@@ -341,6 +345,13 @@ namespace GungeonOnline
             if (Input.GetKeyDown(KeyCode.Y) && !GameManager.Instance.IsFoyer)
             {
                 ThrowSync.TestCopiedThrow(me, Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift) ? "Molotov" : "Bomb");
+                return;
+            }
+            // M: flip our Turbo mode (as the Breach NPC does; the host's choice goes to everyone).
+            if (Input.GetKeyDown(KeyCode.M) && GameStatsManager.HasInstance)
+            {
+                GameStatsManager.Instance.isTurboMode = !GameStatsManager.Instance.isTurboMode;
+                Log.LogInfo("Test: Turbo mode " + (GameStatsManager.Instance.isTurboMode ? "on." : "off."));
                 return;
             }
             // O: lock the game up for 15 s (checks that FreezeWatch reports it).
@@ -606,6 +617,7 @@ namespace GungeonOnline
             AttackSync.Update();
             DuelSync.Update();
             ThrowSync.Update();
+            GameModeSync.Update();
             CompanionSync.Update();
             NetStats.Update(session.Status == NetSession.State.Connected);
             if (testMode)

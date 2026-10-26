@@ -19,6 +19,17 @@ namespace GungeonOnline
         private const float ResendInterval = 0.2f;
         private const int MaxAhead = 1024;   // reliable packets kept while waiting for an earlier one
 
+        // Test copies ("--gungeon-online-lag 35"): every packet we send waits this long first, so two copies on one PC
+        // feel like an internet connection (35 on each side = about 70 ms ping).
+        public static int TestLagMs;
+        private struct Delayed
+        {
+            public byte[] Packet;
+            public IPEndPoint To;
+            public float SendAt;
+        }
+        private readonly Queue<Delayed> delayed = new Queue<Delayed>();
+
         public enum PacketKind : byte
         {
             Unreliable = 1,
@@ -122,6 +133,11 @@ namespace GungeonOnline
             }
 
             float now = Time.realtimeSinceStartup;
+            while (delayed.Count > 0 && delayed.Peek().SendAt <= now)
+            {
+                Delayed d = delayed.Dequeue();
+                SendNow(d.Packet, d.To);
+            }
             foreach (Peer peer in peers)
             {
                 if (peer == null)
@@ -342,6 +358,20 @@ namespace GungeonOnline
         {
             if (to == null)
                 return;
+            if (TestLagMs > 0)
+            {
+                Delayed d;
+                d.Packet = packet;
+                d.To = to;
+                d.SendAt = Time.realtimeSinceStartup + TestLagMs / 1000f;
+                delayed.Enqueue(d);
+                return;
+            }
+            SendNow(packet, to);
+        }
+
+        private void SendNow(byte[] packet, IPEndPoint to)
+        {
             try
             {
                 udp.Send(packet, packet.Length, to);

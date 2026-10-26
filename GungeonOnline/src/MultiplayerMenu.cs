@@ -185,39 +185,99 @@ namespace GungeonOnline
                 scroll.y = Mathf.Max(0f, focusRect.y - 8f);
         }
 
+        // The game's look: near-black boxes with a light pixel border, plain light text that turns gold when picked
+        // (like its pause menu), and a pixel font when the game has one Unity's menus can use.
+        private static readonly Color Ink = new Color(0.92f, 0.89f, 0.80f);
+        private static readonly Color Gold = new Color(0.98f, 0.80f, 0.30f);
+        private static readonly Color Dim = new Color(0.62f, 0.60f, 0.55f);
+
         private static void MakeStyles()
         {
             if (panel != null)
                 return;
-            Texture2D bg = new Texture2D(1, 1);
-            bg.SetPixel(0, 0, new Color(0.09f, 0.07f, 0.06f, 0.96f));
-            bg.Apply();
+            Font pixel = GameFont();
+
             panel = new GUIStyle(GUI.skin.box);
-            panel.normal.background = bg;
+            panel.normal.background = Framed(new Color(0.05f, 0.05f, 0.07f, 0.97f), Ink, 3);
+            panel.border = new RectOffset(4, 4, 4, 4);
             panel.padding = new RectOffset(28, 28, 22, 22);
 
             title = new GUIStyle(GUI.skin.label);
-            title.fontSize = 34;
-            title.fontStyle = FontStyle.Bold;
+            title.font = pixel;
+            title.fontSize = 36;
             title.alignment = TextAnchor.MiddleCenter;
-            title.normal.textColor = new Color(0.95f, 0.78f, 0.35f);
+            title.normal.textColor = Gold;
 
             label = new GUIStyle(GUI.skin.label);
+            label.font = pixel;
             label.fontSize = 20;
             label.wordWrap = true;
-            label.normal.textColor = Color.white;
+            label.normal.textColor = Ink;
+            label.hover.textColor = Gold;
+            label.onNormal.textColor = Ink;
+            label.onHover.textColor = Gold;
 
             small = new GUIStyle(label);
             small.fontSize = 16;
-            small.normal.textColor = new Color(0.8f, 0.8f, 0.8f);
+            small.normal.textColor = Dim;
+            small.hover.textColor = Dim;
 
+            // Buttons: a dark plate whose border and text turn gold when hovered/pressed.
             button = new GUIStyle(GUI.skin.button);
+            button.font = pixel;
             button.fontSize = 22;
             button.fixedHeight = 44;
+            button.normal.background = Framed(new Color(0.10f, 0.10f, 0.13f, 1f), new Color(0.35f, 0.34f, 0.32f), 2);
+            button.hover.background = Framed(new Color(0.14f, 0.13f, 0.16f, 1f), Gold, 2);
+            button.active.background = button.hover.background;
+            button.border = new RectOffset(3, 3, 3, 3);
+            button.normal.textColor = Ink;
+            button.hover.textColor = Gold;
+            button.active.textColor = Gold;
 
             field = new GUIStyle(GUI.skin.textField);
+            field.font = pixel;
             field.fontSize = 20;
             field.fixedHeight = 34;
+            field.normal.background = Framed(new Color(0.02f, 0.02f, 0.03f, 1f), new Color(0.35f, 0.34f, 0.32f), 2);
+            field.focused.background = Framed(new Color(0.02f, 0.02f, 0.03f, 1f), Gold, 2);
+            field.hover.background = field.normal.background;
+            field.border = new RectOffset(3, 3, 3, 3);
+            field.padding = new RectOffset(8, 8, 6, 6);
+            field.normal.textColor = Ink;
+            field.focused.textColor = Ink;
+            field.hover.textColor = Ink;
+        }
+
+        // A small box texture with a solid border, kept pixel-sharp (no smoothing) like the game's art.
+        private static Texture2D Framed(Color fill, Color edge, int thickness)
+        {
+            const int size = 8;
+            Texture2D t = new Texture2D(size, size);
+            t.filterMode = FilterMode.Point;
+            for (int x = 0; x < size; x++)
+                for (int y = 0; y < size; y++)
+                    t.SetPixel(x, y, x < thickness || y < thickness || x >= size - thickness || y >= size - thickness ? edge : fill);
+            t.Apply();
+            return t;
+        }
+
+        // A pixel font from the game's own files, if one is loaded (null: Unity's default font).
+        private static Font GameFont()
+        {
+            Font best = null;
+            string names = "";
+            foreach (Font f in Resources.FindObjectsOfTypeAll<Font>())
+            {
+                if (f == null)
+                    continue;
+                names += (names.Length > 0 ? ", " : "") + f.name;
+                string n = f.name.ToLowerInvariant();
+                if (best == null && (n.Contains("04b") || n.Contains("pixel") || n.Contains("silkscreen") || n.Contains("gungeon")))
+                    best = f;
+            }
+            Plugin.Log.LogInfo("Menu fonts available: " + names + "; using " + (best != null ? best.name : "the default") + ".");
+            return best;
         }
 
         public static void Draw()

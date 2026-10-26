@@ -10,7 +10,7 @@
 # -Test host / -Test join: auto-host on LAN / auto-join 127.0.0.1 once the title screen is up.
 # -Profile OnlineTest: run another Gale profile (no automatic install there).
 # -Bot: this copy plays itself in runs (Take a Break, always on).
-param([string]$Name = "", [string]$Test = "", [switch]$AllocProf, [string]$Profile = "Bare", [string]$TestRun = "", [switch]$Bot)
+param([string]$Name = "", [string]$Test = "", [switch]$AllocProf, [string]$Profile = "Bare", [string]$TestRun = "", [switch]$Bot, [int]$Lag = 0)
 $ErrorActionPreference = "Stop"
 
 $GameDir = "S:\_Games\Steamapps\steamapps\common\Enter the Gungeon"
@@ -41,6 +41,10 @@ if ($AllocProf) {
 }
 if ($Bot) {
     $gameArgs += @("--gungeon-online-bot")
+}
+if ($Lag -gt 0) {
+    # Test: hold every packet this many ms before sending (35 on both copies = about 70 ms ping).
+    $gameArgs += @("--gungeon-online-lag", $Lag)
 }
 if ($TestRun -ne "") {
     $gameArgs += @("--gungeon-online-test-run", $TestRun)

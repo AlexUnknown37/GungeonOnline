@@ -238,7 +238,11 @@ namespace GungeonOnline
             bool halfMoney = Plugin.HalfMoney.Value;
             bool fightPull = Plugin.TeleportToFights.Value;
             float healthFactor = DifficultySync.Factor;
-            SendReliable(MsgType.Rules, delegate (BinaryWriter w) { w.Write(pvp); w.Write(halfMoney); w.Write(fightPull); w.Write(healthFactor); });
+            SendReliable(MsgType.Rules, delegate (BinaryWriter w)
+            {
+                w.Write(pvp); w.Write(halfMoney); w.Write(fightPull); w.Write(healthFactor);
+                GameModeSync.Write(w);
+            });
         }
 
         // The link in use right now, or null when offline.
@@ -694,6 +698,7 @@ namespace GungeonOnline
                             joinerHalfMoney = r.ReadBoolean();
                             joinerFightPull = r.ReadBoolean();
                             DifficultySync.SetFromHost(r.ReadSingle());
+                            GameModeSync.Read(r);
                             Plugin.Log.LogInfo("Host rules: PvP " + (joinerPvp ? "on" : "off") + ", split money " + (joinerHalfMoney ? "on" : "off")
                                 + ", teleport to fights " + (joinerFightPull ? "on" : "off"));
                         }

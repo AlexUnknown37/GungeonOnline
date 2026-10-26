@@ -180,10 +180,11 @@ namespace GungeonOnline
             return false;
         }
 
-        // Breach NPCs answer the Cultist with "you're not the protagonist" lines and won't let them change settings
-        // (randomizer and such): their scripts branch on the talking player's character (CharacterClassSwitch). In
-        // local co-op that's player 2. Online the host decides the settings, so in the Breach the host always gets
+        // NPCs answer the Cultist with "you're not the protagonist" lines (Breach NPCs won't let them change settings,
+        // vendors won't sell): their scripts branch on the talking player's character (CharacterClassSwitch). In
+        // local co-op that's player 2. Online: in the Breach the host decides the settings, so the host always gets
         // the normal lines (even as the Cultist) and every guest gets the Cultist's, whatever character they play.
+        // Anywhere else every player is the hero of their own game: nobody gets the Cultist's lines (vendors sell).
         private static readonly System.Reflection.FieldInfo switchCompareTo = AccessTools.Field(typeof(CharacterClassSwitch), "compareTo");
         private static readonly System.Reflection.FieldInfo switchSendEvent = AccessTools.Field(typeof(CharacterClassSwitch), "sendEvent");
 
@@ -191,9 +192,10 @@ namespace GungeonOnline
         [HarmonyPatch(typeof(CharacterClassSwitch), "DoCharSwitch")]
         private static bool BeforeCharacterSwitch(CharacterClassSwitch __instance)
         {
-            if (session == null || session.Status != NetSession.State.Connected || !GameManager.HasInstance || !GameManager.Instance.IsFoyer
+            if (session == null || session.Status != NetSession.State.Connected || !GameManager.HasInstance
                 || switchCompareTo == null || switchSendEvent == null)
                 return true;
+            bool breach = GameManager.Instance.IsFoyer;
             PlayableCharacters[] compareTo = switchCompareTo.GetValue(__instance) as PlayableCharacters[];
             HutongGames.PlayMaker.FsmEvent[] sendEvent = switchSendEvent.GetValue(__instance) as HutongGames.PlayMaker.FsmEvent[];
             if (compareTo == null || sendEvent == null)
@@ -201,12 +203,12 @@ namespace GungeonOnline
             int cultistBranch = System.Array.IndexOf(compareTo, PlayableCharacters.CoopCultist);
             if (cultistBranch < 0 || cultistBranch >= sendEvent.Length)
                 return true; // no Cultist lines here: the usual per-character choice
-            if (!session.Link.IsHost)
+            if (breach && !session.Link.IsHost)
             {
                 __instance.Fsm.Event(sendEvent[cultistBranch]);
                 return false;
             }
-            // Host: our own character's lines, but never the Cultist's (no match = the normal lines).
+            // Our own character's lines, but never the Cultist's (no match = the normal lines).
             PlayerController me = GameManager.Instance.PrimaryPlayer;
             PlayableCharacters who = me != null ? me.characterIdentity : PlayableCharacters.Pilot;
             for (int i = 0; i < compareTo.Length && i < sendEvent.Length; i++)

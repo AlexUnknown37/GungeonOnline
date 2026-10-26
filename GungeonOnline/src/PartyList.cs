@@ -110,6 +110,22 @@ namespace GungeonOnline
 
                 // Hearts, then armor, wrapping every HeartsPerRow.
                 int i = 0;
+                if (FindRealSprites())
+                {
+                    GUI.color = ghost ? new Color(1f, 1f, 1f, 0.6f) : Color.white;
+                    for (int h = 0; h < containers; h++, i++)
+                    {
+                        float fill = Mathf.Clamp01(health - h);
+                        DrawReal(fill >= 0.99f ? realFull : fill > 0.01f ? realHalf : realEmpty, Cell(tx, y + nameH, i, heartStep, px));
+                    }
+                    for (int a = 0; a < shields; a++, i++)
+                        DrawReal(realArmor, Cell(tx, y + nameH, i, heartStep, px));
+                    int realBlankRow = i == 0 ? HeartsPerRow : (i + HeartsPerRow - 1) / HeartsPerRow * HeartsPerRow;
+                    for (int b = 0; b < Blanks(e); b++)
+                        DrawReal(realBlank, Cell(tx, y + nameH, realBlankRow + b, heartStep, px));
+                    y += rowH + 3f * px;
+                    continue;
+                }
                 for (int h = 0; h < containers; h++, i++)
                 {
                     Rect cell = Cell(tx, y + nameH, i, heartStep, px);
@@ -285,6 +301,80 @@ namespace GungeonOnline
             GUIUtility.RotateAroundPivot(-90f, c);
             GUI.DrawTextureWithTexCoords(new Rect(c.x - dh * 0.5f, c.y - dw * 0.5f, dh, dw), tex, uvRect);
             GUI.matrix = saved;
+        }
+
+        // The game's own HUD pictures (full/half/empty heart, armor, blank), taken from its UI atlas.
+        private struct RealSprite
+        {
+            public Texture2D Texture;
+            public Rect Uv;
+            public Vector2 Size;
+        }
+        private static RealSprite realFull, realHalf, realEmpty, realArmor, realBlank;
+        private static bool haveReal;
+        private static float nextRealLookAt;
+
+        private static bool FindRealSprites()
+        {
+            if (haveReal)
+                return realFull.Texture != null;
+            if (Time.realtimeSinceStartup < nextRealLookAt)
+                return false;
+            nextRealLookAt = Time.realtimeSinceStartup + 2f;
+            try
+            {
+                GameUIRoot root = GameUIRoot.Instance;
+                if (root == null || root.heartControllers == null || root.heartControllers.Count == 0
+                    || root.blankControllers == null || root.blankControllers.Count == 0)
+                    return false;
+                GameUIHeartController hearts = root.heartControllers[0];
+                dfSprite blankPrefab = root.blankControllers[0].blankSpritePrefab;
+                if (hearts.heartSpritePrefab == null || hearts.armorSpritePrefab == null || blankPrefab == null)
+                    return false;
+                dfAtlas atlas = hearts.heartSpritePrefab.Atlas;
+                bool ok = Real(atlas, hearts.fullHeartSpriteName, out realFull)
+                    & Real(atlas, hearts.halfHeartSpriteName, out realHalf)
+                    & Real(atlas, hearts.emptyHeartSpriteName, out realEmpty)
+                    & Real(hearts.armorSpritePrefab.Atlas, hearts.armorSpritePrefab.SpriteName, out realArmor)
+                    & Real(blankPrefab.Atlas, blankPrefab.SpriteName, out realBlank);
+                Plugin.Log.LogInfo("Team HUD: the game's heart/armor/blank pictures " + (ok ? "found" : "not found; using drawn ones")
+                    + " (" + hearts.fullHeartSpriteName + ", " + hearts.armorSpritePrefab.SpriteName + ", " + blankPrefab.SpriteName + ").");
+                if (!ok)
+                    realFull.Texture = null;
+                haveReal = true;
+                return ok;
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning("Team HUD: couldn't read the game's HUD pictures: " + ex.Message);
+                haveReal = true;
+                realFull.Texture = null;
+                return false;
+            }
+        }
+
+        private static bool Real(dfAtlas atlas, string name, out RealSprite sprite)
+        {
+            sprite = new RealSprite();
+            if (atlas == null || string.IsNullOrEmpty(name) || atlas.Texture == null)
+                return false;
+            dfAtlas.ItemInfo item = atlas[name];
+            if (item == null || item.rotated)
+                return false;
+            sprite.Texture = atlas.Texture;
+            sprite.Uv = item.region;
+            sprite.Size = item.sizeInPixels;
+            return true;
+        }
+
+        // Fit the picture into the cell, bottom-centered (filling it: whole-number steps left them tiny).
+        private static void DrawReal(RealSprite s, Rect cell)
+        {
+            if (s.Texture == null || s.Size.x <= 0f || s.Size.y <= 0f)
+                return;
+            float scale = Mathf.Min(cell.width / s.Size.x, cell.height / s.Size.y);
+            float w = s.Size.x * scale, h = s.Size.y * scale;
+            GUI.DrawTextureWithTexCoords(new Rect(cell.x + (cell.width - w) * 0.5f, cell.y + (cell.height - h), w, h), s.Texture, s.Uv);
         }
 
         private static void EnsureTextures()

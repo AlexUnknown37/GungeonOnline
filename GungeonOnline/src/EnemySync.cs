@@ -314,6 +314,27 @@ namespace GungeonOnline
             public float ReceivedAt;
         }
 
+        // How long a message from that player took to get here: half the round trip to the host, or (a guest hearing
+        // another guest, relayed by the host) the whole round trip - two legs. Unknown ping counts as none.
+        private static float OneWayDelay(int from)
+        {
+            float ms;
+            if (session.Link.IsHost)
+                ms = from > 0 && from < session.Players.Length ? session.Players[from].PingMs * 0.5f : 0f;
+            else
+            {
+                float toHost = session.Players[0].PingMs;
+                ms = from == 0 ? toHost * 0.5f : toHost;
+            }
+            return Mathf.Clamp(ms, 0f, 300f) / 1000f;
+        }
+
+        // ---- Drift meter ----
+        // How far our copy of an enemy is from where the game in charge has it right now (its report moved on by
+        // the network delay), measured as each report arrives; summed up in the log once a minute.
+        private static float driftSum, driftWorst, delaySum;
+        private static int driftCount;
+
         public static int KindOf(AIActor a)
         {
             return KindHash(a != null ? a.EnemyGuid : null);
@@ -490,6 +511,14 @@ namespace GungeonOnline
                         + " (two games leading one room; a few at doors are normal).");
                 bothLead[i] = 0;
             }
+            if (driftCount > 0)
+            {
+                Plugin.Log.LogInfo("Enemy drift in the last minute: average " + (driftSum / driftCount).ToString("0.00") + " tiles, worst "
+                    + driftWorst.ToString("0.00") + " over " + driftCount + " updates; network delay ~" + Mathf.RoundToInt(delaySum / driftCount * 1000f)
+                    + " ms.");
+                driftSum = driftWorst = delaySum = 0f;
+                driftCount = 0;
+            }
         }
 
         public static void OnEnemyStates(BinaryReader r)
@@ -500,6 +529,7 @@ namespace GungeonOnline
                 return;
             CheckFloor();
             float now = Time.realtimeSinceStartup;
+            float delay = OneWayDelay(session.From);
             for (int i = 0; i < count; i++)
             {
                 int id = r.ReadInt32();
@@ -539,6 +569,15 @@ namespace GungeonOnline
                 c.Target = theirPos;
                 c.Velocity = theirVelocity;
                 c.ReceivedAt = now;
+                if (a.specRigidbody != null && a.gameObject.activeInHierarchy)
+                {
+                    float drift = Vector2.Distance(a.specRigidbody.UnitCenter, theirPos + theirVelocity * delay);
+                    driftSum += drift;
+                    delaySum += delay;
+                    driftCount++;
+                    if (drift > driftWorst)
+                        driftWorst = drift;
+                }
             }
         }
 
@@ -563,6 +602,8 @@ namespace GungeonOnline
                 }
                 Correction c = pair.Value;
                 // Where the leading game has it now: its last report moved on by its velocity (a short way only).
+                // (Also guessing ahead by the measured network delay drifted more in tests at ~70 ms ping: the ping
+                // estimate includes frame waits and overshoots.)
                 Vector2 predicted = c.Target + c.Velocity * Mathf.Min(now - c.ReceivedAt, 0.2f);
                 Vector2 delta = predicted - a.specRigidbody.UnitCenter;
                 float dist = delta.magnitude;

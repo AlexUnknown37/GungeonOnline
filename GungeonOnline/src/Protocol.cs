@@ -70,7 +70,7 @@ namespace GungeonOnline
     public static class Protocol
     {
         // Bump this whenever the packet format changes, so old and new versions refuse to talk.
-        public const int Version = 48;
+        public const int Version = 49;
         public const int Channel = 0;
         public const int MaxPlayers = 4;
         public const byte NoSlot = 255;   // a guest before the host has given it a slot

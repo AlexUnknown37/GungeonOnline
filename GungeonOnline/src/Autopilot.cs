@@ -34,7 +34,8 @@ namespace GungeonOnline
 
         // What we "press" this tick.
         private Vector2 move;
-        private bool shoot, dodge, reload, interact;
+        private bool shoot, dodge, reload, interact, blank;
+        private float nextBlankAt;
 
         // Path following.
         private static readonly List<Vector2> waypoints = new List<Vector2>();
@@ -106,7 +107,7 @@ namespace GungeonOnline
             active = false;
             forced = false;
             move = Vector2.zero;
-            shoot = dodge = reload = false;
+            shoot = dodge = reload = blank = false;
             PlayerController me = Player;
             if (me != null)
                 me.forceAimPoint = null;
@@ -138,7 +139,7 @@ namespace GungeonOnline
             {
                 graceUntil = now + 0.75f;
                 move = Vector2.zero;
-                shoot = dodge = reload = false;
+                shoot = dodge = reload = blank = false;
                 return;
             }
             if (PlayerIndex == 0 && !forced && now > graceUntil && PlayerTouchedControls())
@@ -177,7 +178,7 @@ namespace GungeonOnline
         private void Think(PlayerController me)
         {
             move = Vector2.zero;
-            shoot = dodge = reload = false;
+            shoot = dodge = reload = blank = false;
             float now = Time.realtimeSinceStartup;
             Vector2 pos = me.CenterPosition;
             PickGun(me, now);
@@ -185,7 +186,16 @@ namespace GungeonOnline
             AIActor target = me.IsGhost ? null : ClosestEnemy(me, pos);
             Vector2 threatDir = Vector2.zero;
             float timeToHit = float.MaxValue;
-            bool threatened = !me.IsGhost && IncomingBullet(pos, out threatDir, out timeToHit);
+            int closeCalls = 0;
+            bool threatened = !me.IsGhost && IncomingBullet(pos, out threatDir, out timeToHit, out closeCalls);
+            // Too many bullets to dodge (or a few at our last heart): use a blank, like a person would.
+            if (threatened && me.Blanks > 0 && now >= nextBlankAt && me.healthHaver != null
+                && (closeCalls >= 5 || (closeCalls >= 2 && me.healthHaver.GetCurrentHealth() + me.healthHaver.Armor <= 1f)))
+            {
+                blank = true;
+                nextBlankAt = now + 4f;
+                Plugin.Log.LogInfo("Bot" + (PlayerIndex == 0 ? "" : " (" + Label + ")") + ": " + closeCalls + " bullets coming; using a blank.");
+            }
 
             // Aim: at the enemy (with a little lead), else where we're going.
             if (target != null)
@@ -315,6 +325,17 @@ namespace GungeonOnline
                 // Mid-roll over a gap: hold the direction (steering away from the pit now would drop us in).
                 move = pitRollDir;
             }
+            else if (!threatened && target == null && !me.IsGhost && blocker is FlippableCover && now - blockedAt < 0.3f
+                && now >= nextDodgeAt && !me.IsDodgeRolling && move.sqrMagnitude > 0.01f)
+            {
+                // A table in the way: roll over it (a roll clears tables), and shoot it if that doesn't work.
+                move = move.normalized;
+                dodge = true;
+                nextDodgeAt = now + DodgeCooldown;
+                pitRollDir = move;
+                pitRollUntil = now + 0.7f;
+                Plugin.Log.LogInfo("Bot" + (PlayerIndex == 0 ? "" : " (" + Label + ")") + ": rolling over " + blocker.name + ".");
+            }
             else if (!threatened && PitJump(me, feet, now, out jumpDir))
             {
                 move = jumpDir;
@@ -386,10 +407,11 @@ namespace GungeonOnline
         }
 
         // A bullet heading for us: which way to step (sideways from its path, away from it) and how soon it hits.
-        private bool IncomingBullet(Vector2 pos, out Vector2 stepDir, out float timeToHit)
+        private bool IncomingBullet(Vector2 pos, out Vector2 stepDir, out float timeToHit, out int closeCalls)
         {
             stepDir = Vector2.zero;
             timeToHit = float.MaxValue;
+            closeCalls = 0;   // bullets that will hit within about half a second
             bool found = false;
             foreach (Projectile p in StaticReferenceManager.AllProjectiles)
             {
@@ -412,6 +434,8 @@ namespace GungeonOnline
                 if (miss > 1.1f)
                     continue;
                 float t = along / speed;
+                if (t < 0.5f)
+                    closeCalls++;
                 if (t < timeToHit)
                 {
                     timeToHit = t;
@@ -969,7 +993,8 @@ namespace GungeonOnline
         private Vector2 lastPos;
         private float stuckSince = -1f, sidestepUntil, sidestepSign = 1f;
         private Vector2 sidestepDir;
-        private int sidesteps;
+        private int sidesteps, backoffs;
+        private RoomHandler backoffRoom;
 
         private Vector2 Unstick(Vector2 pos, Vector2 want, float now)
         {
@@ -995,13 +1020,29 @@ namespace GungeonOnline
             sidesteps++;
             if (sidesteps >= 3 && me != null && me.CurrentRoom != null)
             {
-                // Sidesteps didn't free us (a corner: walls two ways): head for the middle of the room for a moment.
+                // Sidesteps didn't free us (a corner: walls two ways): back off the way we came (or to the middle of
+                // the room if that's behind us) for a moment.
                 IntVector2 c = me.CurrentRoom.GetCenterCell();
                 Vector2 toCenter = new Vector2(c.x + 0.5f, c.y + 0.5f) - pos;
-                sidestepDir = KeepSafe(me, pos, toCenter.sqrMagnitude > 0.01f ? toCenter.normalized : -want);
-                sidestepUntil = now + 0.9f;
+                Vector2 back = toCenter.sqrMagnitude > 0.01f && Vector2.Dot(toCenter, want) < 0f ? toCenter.normalized : -want;
+                sidestepDir = KeepSafe(me, pos, back);
+                sidestepUntil = now + 1.2f;
                 sidesteps = 0;
                 waypoints.Clear();
+                // Stuck twice on the way to the same unexplored room: pick another "?" room off the map.
+                if (exploreRoom != null)
+                {
+                    backoffs = exploreRoom == backoffRoom ? backoffs + 1 : 1;
+                    backoffRoom = exploreRoom;
+                    if (backoffs >= 2)
+                    {
+                        Plugin.Log.LogInfo("Bot: stuck on the way to " + exploreRoom.GetRoomName() + "; going back, trying another room.");
+                        explored.Add(exploreRoom);
+                        exploreRoom = null;
+                        progressRoom = null;
+                        backoffs = 0;
+                    }
+                }
                 return sidestepDir;
             }
             Vector2 side = new Vector2(-want.y, want.x) * sidestepSign;
@@ -1210,7 +1251,9 @@ namespace GungeonOnline
             pressed[set.DodgeRollAction] = dodge ? 1f : 0f;
             pressed[set.ReloadAction] = reload ? 1f : 0f;
             pressed[set.InteractAction] = interact ? 1f : 0f;
+            pressed[set.BlankAction] = blank ? 1f : 0f;
             dodge = false;   // one tick each
+            blank = false;
             reload = false;
             interact = false;
 
