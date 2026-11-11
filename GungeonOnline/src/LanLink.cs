@@ -18,6 +18,10 @@ namespace GungeonOnline
         public const byte Magic1 = (byte)'O';
         private const float ResendInterval = 0.2f;
         private const int MaxAhead = 1024;   // reliable packets kept while waiting for an earlier one
+        // At most this many of the oldest unacknowledged packets are re-sent per round: the receiver hands packets
+        // over in order, so the oldest are the ones it is waiting for, and re-sending a long backlog all at once
+        // (after the other side froze on a level load) only overflows its socket buffer again.
+        private const int MaxResendPerRound = 128;
 
         // Test copies ("--gungeon-online-lag 35"): every packet we send waits this long first, so two copies on one PC
         // feel like an internet connection (35 on each side = about 70 ms ping).
@@ -142,7 +146,8 @@ namespace GungeonOnline
             {
                 if (peer == null)
                     continue;
-                for (int i = 0; i < peer.Unacked.Count; i++)
+                int resendCount = Math.Min(peer.Unacked.Count, MaxResendPerRound);
+                for (int i = 0; i < resendCount; i++)
                 {
                     if (now - peer.Unacked[i].LastSent >= ResendInterval)
                     {
@@ -247,14 +252,20 @@ namespace GungeonOnline
                     ushort acked = BitConverter.ToUInt16(data, 3);
                     if (BitConverter.ToUInt16(data, 5) != peer.SendEpoch)
                         return; // an ack for an older connection
-                    peer.Unacked.RemoveAll(delegate (Pending p) { return p.Seq == acked; });
+                    for (int i = 0; i < peer.Unacked.Count; i++)
+                    {
+                        if (peer.Unacked[i].Seq == acked)
+                        {
+                            peer.Unacked.RemoveAt(i);
+                            break;
+                        }
+                    }
                     break;
 
                 case PacketKind.Reliable:
                     if (data.Length < 7) return;
                     ushort seq = BitConverter.ToUInt16(data, 3);
                     ushort epoch = BitConverter.ToUInt16(data, 5);
-                    SendRaw(Wrap(PacketKind.Ack, seq, null, epoch), from);
                     if (peer.RecvEpoch != epoch)
                     {
                         // They started over (or this is the first packet): count from here.
@@ -263,10 +274,14 @@ namespace GungeonOnline
                         peer.Early.Clear();
                     }
                     short ahead = (short)(seq - peer.NextRecvSeq);
+                    // Only acknowledge what we keep. An acknowledged packet is never sent again, so acknowledging
+                    // one we then throw away would lose it for good and stop the ordered stream at its number
+                    // (everything after it waits forever while positions keep flowing: "half-connected").
+                    if (ahead > MaxAhead)
+                        return; // too far ahead to store: no ack, so the sender re-sends it once we've caught up
+                    SendRaw(Wrap(PacketKind.Ack, seq, null, epoch), from);
                     if (ahead < 0)
                         return; // already delivered; our ack was lost, so they re-sent
-                    if (ahead > MaxAhead)
-                        return; // far beyond anything sent in order: don't store it (a broken or hostile sender)
                     byte[] body = new byte[data.Length - 7];
                     Buffer.BlockCopy(data, 7, body, 0, body.Length);
                     peer.Early[seq] = body;
