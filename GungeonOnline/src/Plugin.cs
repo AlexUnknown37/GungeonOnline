@@ -100,7 +100,7 @@ namespace GungeonOnline
                     testBot = true;
             }
 
-            AllocProfiler.Init();
+            InitPart("AllocProfiler", delegate { AllocProfiler.Init(); });
             for (int i = 0; i < Protocol.MaxPlayers; i++)
             {
                 Puppets[i] = new RemotePuppet();
@@ -109,45 +109,45 @@ namespace GungeonOnline
             session = new NetSession();
             window = new DebugWindow(session);
             Harmony harmony = new Harmony(Guid);
-            LevelSync.Init(session, harmony);
-            BulletSync.Init(session, harmony);
-            DeathSync.Init(session, harmony);
-            EnemySync.Init(session, harmony);
-            AttackSync.Init(session, harmony);
-            CompanionSync.Init(session);
-            GenerationSeed.Init(session, harmony);
-            EffectSync.Init(session, harmony);
-            KeyItemSync.Init(session, harmony);
-            GameModeSync.Init(session);
-            DuelSync.Init(session, harmony);
-            ThrowSync.Init(session, harmony);
-            BlankSync.Init(session, harmony);
-            MenuButtons.Init(harmony);
-            MenuGuard.Init(harmony);
-            MultiplayerMenu.Init(session);
-            PauseSync.Init(session);
-            WorldSync.Init(session, harmony);
-            PetSync.Init(session);
-            TargetSync.Init(session, harmony);
-            PlayerWarp.Init(session);
-            SaveSync.Init(session, harmony);
-            SaveSlotLabel.Init(session);
-            LootSync.Init(session, harmony);
-            LoopSync.Init(session, harmony);
-            OrbitalSync.Init(session);
-            FloorCheck.Init(session);
-            ModSettingsSync.Init(session);
-            ShopBan.Init(session, harmony);
-            BeamSync.Init(session);
-            ExpandSync.Init(session, harmony);
-            Autopilot.Init(session, harmony);
-            BreakButton.Init(session, harmony);
-            StandIn.Init(session, harmony);
-            DifficultySync.Init(session, harmony);
-            TablePush.Init(session);
-            BreachCultist.Init(session, harmony);
-            InventorySync.Init(session);
-            PartnerMapMarker.Init(session);
+            InitPart("LevelSync", delegate { LevelSync.Init(session, harmony); });
+            InitPart("BulletSync", delegate { BulletSync.Init(session, harmony); });
+            InitPart("DeathSync", delegate { DeathSync.Init(session, harmony); });
+            InitPart("EnemySync", delegate { EnemySync.Init(session, harmony); });
+            InitPart("AttackSync", delegate { AttackSync.Init(session, harmony); });
+            InitPart("CompanionSync", delegate { CompanionSync.Init(session); });
+            InitPart("GenerationSeed", delegate { GenerationSeed.Init(session, harmony); });
+            InitPart("EffectSync", delegate { EffectSync.Init(session, harmony); });
+            InitPart("KeyItemSync", delegate { KeyItemSync.Init(session, harmony); });
+            InitPart("GameModeSync", delegate { GameModeSync.Init(session); });
+            InitPart("DuelSync", delegate { DuelSync.Init(session, harmony); });
+            InitPart("ThrowSync", delegate { ThrowSync.Init(session, harmony); });
+            InitPart("BlankSync", delegate { BlankSync.Init(session, harmony); });
+            InitPart("MenuButtons", delegate { MenuButtons.Init(harmony); });
+            InitPart("MenuGuard", delegate { MenuGuard.Init(harmony); });
+            InitPart("MultiplayerMenu", delegate { MultiplayerMenu.Init(session); });
+            InitPart("PauseSync", delegate { PauseSync.Init(session); });
+            InitPart("WorldSync", delegate { WorldSync.Init(session, harmony); });
+            InitPart("PetSync", delegate { PetSync.Init(session); });
+            InitPart("TargetSync", delegate { TargetSync.Init(session, harmony); });
+            InitPart("PlayerWarp", delegate { PlayerWarp.Init(session); });
+            InitPart("SaveSync", delegate { SaveSync.Init(session, harmony); });
+            InitPart("SaveSlotLabel", delegate { SaveSlotLabel.Init(session); });
+            InitPart("LootSync", delegate { LootSync.Init(session, harmony); });
+            InitPart("LoopSync", delegate { LoopSync.Init(session, harmony); });
+            InitPart("OrbitalSync", delegate { OrbitalSync.Init(session); });
+            InitPart("FloorCheck", delegate { FloorCheck.Init(session); });
+            InitPart("ModSettingsSync", delegate { ModSettingsSync.Init(session); });
+            InitPart("ShopBan", delegate { ShopBan.Init(session, harmony); });
+            InitPart("BeamSync", delegate { BeamSync.Init(session); });
+            InitPart("ExpandSync", delegate { ExpandSync.Init(session, harmony); });
+            InitPart("Autopilot", delegate { Autopilot.Init(session, harmony); });
+            InitPart("BreakButton", delegate { BreakButton.Init(session, harmony); });
+            InitPart("StandIn", delegate { StandIn.Init(session, harmony); });
+            InitPart("DifficultySync", delegate { DifficultySync.Init(session, harmony); });
+            InitPart("TablePush", delegate { TablePush.Init(session); });
+            InitPart("BreachCultist", delegate { BreachCultist.Init(session, harmony); });
+            InitPart("InventorySync", delegate { InventorySync.Init(session); });
+            InitPart("PartnerMapMarker", delegate { PartnerMapMarker.Init(session); });
             Log.LogInfo(Name + " " + ModVersion + " loaded. Press " + toggleWindowKey.Value + " in game to open the multiplayer window.");
         }
 
@@ -535,6 +535,33 @@ namespace GungeonOnline
             }
         }
 
+        // Each part of the mod is set up and run on its own: if one fails (a game method it hooks is missing, a
+        // mistake in it), the others still work and the log names the one that didn't. Before, the first failure
+        // during start-up silently left out every part after it, and one error in a frame skipped the rest of that
+        // frame's work - every frame.
+        private static void InitPart(string name, Action init)
+        {
+            try
+            {
+                init();
+            }
+            catch (Exception e)
+            {
+                Log.LogError("Gungeon Online: " + name + " could not start and is switched off: " + e);
+            }
+        }
+
+        private static readonly System.Collections.Generic.Dictionary<string, float> partFailedAt = new System.Collections.Generic.Dictionary<string, float>();
+
+        private static void PartFailed(string name, Exception e)
+        {
+            float now = Time.realtimeSinceStartup, last;
+            if (partFailedAt.TryGetValue(name, out last) && now - last < 5f)
+                return; // the same part failing every frame: say so every 5 seconds, not 60 times a second
+            partFailedAt[name] = now;
+            Log.LogError("Gungeon Online: error in " + name + ": " + e);
+        }
+
         private void UpdateParts()
         {
             if (Input.GetKeyDown(toggleWindowKey.Value))
@@ -553,8 +580,8 @@ namespace GungeonOnline
                 JoinLobbyFromCommandLine();
             }
 
-            { long __m = AllocProfiler.Begin(); session.Update(); AllocProfiler.End("session.Update", __m); }
-            { long __m = AllocProfiler.Begin(); TestStartWhenReady(); AllocProfiler.End("TestStartWhenReady", __m); }
+            { long __m = AllocProfiler.Begin(); try { session.Update(); } catch (Exception e) { PartFailed("session.Update", e); } AllocProfiler.End("session.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { TestStartWhenReady(); } catch (Exception e) { PartFailed("TestStartWhenReady", e); } AllocProfiler.End("TestStartWhenReady", __m); }
             TestRunWhenReady();
             // Test bots hosting: after a game over, start a new run by themselves (the guests follow).
             if (!testBot || session.Link == null || !session.Link.IsHost)
@@ -579,9 +606,9 @@ namespace GungeonOnline
                 Autopilot.Explore = true; // test bots: the living one with the lowest player number leads the way
                 Autopilot.Start(true);
             }
-            { long __m = AllocProfiler.Begin(); Autopilot.Update(); AllocProfiler.End("Autopilot.Update", __m); }
-            { long __m = AllocProfiler.Begin(); StandIn.Update(); AllocProfiler.End("StandIn.Update", __m); }
-            DifficultySync.Update();
+            { long __m = AllocProfiler.Begin(); try { Autopilot.Update(); } catch (Exception e) { PartFailed("Autopilot.Update", e); } AllocProfiler.End("Autopilot.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { StandIn.Update(); } catch (Exception e) { PartFailed("StandIn.Update", e); } AllocProfiler.End("StandIn.Update", __m); }
+            try { DifficultySync.Update(); } catch (Exception e) { PartFailed("DifficultySync.Update", e); }
             TestWarpToTable();
 
             // While playing online the game must keep running when its window isn't focused: otherwise Unity
@@ -591,39 +618,39 @@ namespace GungeonOnline
             bool online = session.Status == NetSession.State.Connected || session.Status == NetSession.State.Connecting;
             if (online && !Application.runInBackground)
                 Application.runInBackground = true;
-            { long __m = AllocProfiler.Begin(); SaveSync.Update(); AllocProfiler.End("SaveSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); LootSync.Update(); AllocProfiler.End("LootSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); LoopSync.Update(); AllocProfiler.End("LoopSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); OrbitalSync.Update(); AllocProfiler.End("OrbitalSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); InventorySync.Update(); AllocProfiler.End("InventorySync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); InventorySync.UpdateRejoin(); AllocProfiler.End("InventorySync.UpdateRejoin", __m); }
-            { long __m = AllocProfiler.Begin(); FloorCheck.Update(); AllocProfiler.End("FloorCheck.Update", __m); }
-            { long __m = AllocProfiler.Begin(); ModSettingsSync.Update(); AllocProfiler.End("ModSettingsSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); ShopBan.Update(); AllocProfiler.End("ShopBan.Update", __m); }
-            { long __m = AllocProfiler.Begin(); BulletSync.Update(); AllocProfiler.End("BulletSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); BeamSync.Update(); AllocProfiler.End("BeamSync.Update", __m); }
-            ExpandSync.Update();
-            { long __m = AllocProfiler.Begin(); PartnerMapMarker.Update(); AllocProfiler.End("PartnerMapMarker.Update", __m); }
-            { long __m = AllocProfiler.Begin(); LevelSync.Update(); AllocProfiler.End("LevelSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); DeathSync.Update(); AllocProfiler.End("DeathSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); PauseSync.Update(); AllocProfiler.End("PauseSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); MultiplayerMenu.Update(); AllocProfiler.End("MultiplayerMenu.Update", __m); }
-            { long __m = AllocProfiler.Begin(); MenuButtons.Update(); AllocProfiler.End("MenuButtons.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { SaveSync.Update(); } catch (Exception e) { PartFailed("SaveSync.Update", e); } AllocProfiler.End("SaveSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { LootSync.Update(); } catch (Exception e) { PartFailed("LootSync.Update", e); } AllocProfiler.End("LootSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { LoopSync.Update(); } catch (Exception e) { PartFailed("LoopSync.Update", e); } AllocProfiler.End("LoopSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { OrbitalSync.Update(); } catch (Exception e) { PartFailed("OrbitalSync.Update", e); } AllocProfiler.End("OrbitalSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { InventorySync.Update(); } catch (Exception e) { PartFailed("InventorySync.Update", e); } AllocProfiler.End("InventorySync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { InventorySync.UpdateRejoin(); } catch (Exception e) { PartFailed("InventorySync.UpdateRejoin", e); } AllocProfiler.End("InventorySync.UpdateRejoin", __m); }
+            { long __m = AllocProfiler.Begin(); try { FloorCheck.Update(); } catch (Exception e) { PartFailed("FloorCheck.Update", e); } AllocProfiler.End("FloorCheck.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { ModSettingsSync.Update(); } catch (Exception e) { PartFailed("ModSettingsSync.Update", e); } AllocProfiler.End("ModSettingsSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { ShopBan.Update(); } catch (Exception e) { PartFailed("ShopBan.Update", e); } AllocProfiler.End("ShopBan.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { BulletSync.Update(); } catch (Exception e) { PartFailed("BulletSync.Update", e); } AllocProfiler.End("BulletSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { BeamSync.Update(); } catch (Exception e) { PartFailed("BeamSync.Update", e); } AllocProfiler.End("BeamSync.Update", __m); }
+            try { ExpandSync.Update(); } catch (Exception e) { PartFailed("ExpandSync.Update", e); }
+            { long __m = AllocProfiler.Begin(); try { PartnerMapMarker.Update(); } catch (Exception e) { PartFailed("PartnerMapMarker.Update", e); } AllocProfiler.End("PartnerMapMarker.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { LevelSync.Update(); } catch (Exception e) { PartFailed("LevelSync.Update", e); } AllocProfiler.End("LevelSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { DeathSync.Update(); } catch (Exception e) { PartFailed("DeathSync.Update", e); } AllocProfiler.End("DeathSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { PauseSync.Update(); } catch (Exception e) { PartFailed("PauseSync.Update", e); } AllocProfiler.End("PauseSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { MultiplayerMenu.Update(); } catch (Exception e) { PartFailed("MultiplayerMenu.Update", e); } AllocProfiler.End("MultiplayerMenu.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { MenuButtons.Update(); } catch (Exception e) { PartFailed("MenuButtons.Update", e); } AllocProfiler.End("MenuButtons.Update", __m); }
             if (steamChecked)
-                { long __m = AllocProfiler.Begin(); SteamFriendsList.UpdateOwnPresence(session); AllocProfiler.End("SteamFriendsList.UpdateOwnPresence", __m); }
-            { long __m = AllocProfiler.Begin(); TablePush.Update(); AllocProfiler.End("TablePush.Update", __m); }
-            { long __m = AllocProfiler.Begin(); WorldSync.Update(); AllocProfiler.End("WorldSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); EnemySync.Update(); AllocProfiler.End("EnemySync.Update", __m); }
-            AttackSync.Update();
-            DuelSync.Update();
-            ThrowSync.Update();
-            GameModeSync.Update();
-            CompanionSync.Update();
+                { long __m = AllocProfiler.Begin(); try { SteamFriendsList.UpdateOwnPresence(session); } catch (Exception e) { PartFailed("SteamFriendsList.UpdateOwnPresence", e); } AllocProfiler.End("SteamFriendsList.UpdateOwnPresence", __m); }
+            { long __m = AllocProfiler.Begin(); try { TablePush.Update(); } catch (Exception e) { PartFailed("TablePush.Update", e); } AllocProfiler.End("TablePush.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { WorldSync.Update(); } catch (Exception e) { PartFailed("WorldSync.Update", e); } AllocProfiler.End("WorldSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { EnemySync.Update(); } catch (Exception e) { PartFailed("EnemySync.Update", e); } AllocProfiler.End("EnemySync.Update", __m); }
+            try { AttackSync.Update(); } catch (Exception e) { PartFailed("AttackSync.Update", e); }
+            try { DuelSync.Update(); } catch (Exception e) { PartFailed("DuelSync.Update", e); }
+            try { ThrowSync.Update(); } catch (Exception e) { PartFailed("ThrowSync.Update", e); }
+            try { GameModeSync.Update(); } catch (Exception e) { PartFailed("GameModeSync.Update", e); }
+            try { CompanionSync.Update(); } catch (Exception e) { PartFailed("CompanionSync.Update", e); }
             NetStats.Update(session.Status == NetSession.State.Connected);
             if (testMode)
                 TestLoadout.Update();
-            { long __m = AllocProfiler.Begin(); TargetSync.Update(); AllocProfiler.End("TargetSync.Update", __m); }
-            { long __m = AllocProfiler.Begin(); PlayerWarp.Update(); AllocProfiler.End("PlayerWarp.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { TargetSync.Update(); } catch (Exception e) { PartFailed("TargetSync.Update", e); } AllocProfiler.End("TargetSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { PlayerWarp.Update(); } catch (Exception e) { PartFailed("PlayerWarp.Update", e); } AllocProfiler.End("PlayerWarp.Update", __m); }
             {
                 long __m = AllocProfiler.Begin();
                 bool connected = session.Status == NetSession.State.Connected;
@@ -636,7 +663,7 @@ namespace GungeonOnline
                 }
                 AllocProfiler.End("puppets.Update", __m);
             }
-            { long __m = AllocProfiler.Begin(); PetSync.Update(); AllocProfiler.End("PetSync.Update", __m); }
+            { long __m = AllocProfiler.Begin(); try { PetSync.Update(); } catch (Exception e) { PartFailed("PetSync.Update", e); } AllocProfiler.End("PetSync.Update", __m); }
             AllocProfiler.Report();
         }
 

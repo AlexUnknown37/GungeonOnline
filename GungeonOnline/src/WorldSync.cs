@@ -134,6 +134,7 @@ namespace GungeonOnline
             if (d != homesFloor)
             {
                 homes.Clear();
+                brokenOnFloor.Clear();
                 homesFloor = d;
                 nextHomeScan = 0f;
             }
@@ -172,8 +173,20 @@ namespace GungeonOnline
         }
         private static readonly List<RecentBreak> recentBreaks = new List<RecentBreak>();
 
+        // Everything that broke here on this floor, by name and starting place. The same object can break at very
+        // different moments in two games (flung off a flipped table, it shatters on landing in one game and lies
+        // there until a stray bullet finds it in the other). The later report then found "no unbroken match" - it
+        // was broken here long ago - and each such miss cost two searches of the whole scene and a warning.
+        private static readonly HashSet<string> brokenOnFloor = new HashSet<string>();
+
+        private static string BrokenKey(string name, Vector2 pos)
+        {
+            return name + "|" + Mathf.RoundToInt(pos.x * 4f) + "," + Mathf.RoundToInt(pos.y * 4f);
+        }
+
         private static void RememberBreak(string name, Vector2 pos)
         {
+            brokenOnFloor.Add(BrokenKey(name, pos));
             float now = Time.realtimeSinceStartup;
             recentBreaks.RemoveAll(delegate (RecentBreak b) { return now - b.At > 10f; });
             if (recentBreaks.Count > 300)
@@ -228,7 +241,7 @@ namespace GungeonOnline
             applyingRemote = true;
             try
             {
-                if (kind != Kind.Table && BrokeHereLately(name, pos))
+                if (kind != Kind.Table && (BrokeHereLately(name, pos) || brokenOnFloor.Contains(BrokenKey(name, pos))))
                 {
                     // Broken here already (usually by the copy of the same bullet).
                 }

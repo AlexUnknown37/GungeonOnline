@@ -119,6 +119,7 @@ namespace GungeonOnline
         private static Dictionary<string, GameActorEffect> byName;  // type|name
         private static Dictionary<string, GameActorEffect> byType;  // type
         private static float lastIndexAt = -1000f;
+        private static readonly HashSet<string> searchedAgainFor = new HashSet<string>();
 
         private static GameActorEffect Find(string type, string name, float duration)
         {
@@ -129,8 +130,10 @@ namespace GungeonOnline
                 return e;
             if (byName.TryGetValue(type + "|" + name, out e))
                 return e;
-            // Something new (another mod's item, or an effect made while playing): look again, at most every 10 s.
-            if (Time.realtimeSinceStartup - lastIndexAt > 10f)
+            // Something new (another mod's item, or an effect made while playing): look again, at most every 10 s -
+            // and once per unknown effect. One that is made in code is never found, and searching every item in the
+            // game again every 10 s for as long as a partner kept using it was a hitch each time.
+            if (Time.realtimeSinceStartup - lastIndexAt > 10f && searchedAgainFor.Add(type + "|" + name))
             {
                 Index();
                 if (exact.TryGetValue(type + "|" + name + "|" + duration.ToString("0.###"), out e) || byName.TryGetValue(type + "|" + name, out e))

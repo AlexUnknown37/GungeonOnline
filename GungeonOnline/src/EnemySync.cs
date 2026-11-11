@@ -76,6 +76,8 @@ namespace GungeonOnline
             hadOverride.Clear();
             pendingDamage.Clear();
             pendingGuid.Clear();
+            System.Array.Clear(lastRoomOf, 0, lastRoomOf.Length);
+            System.Array.Clear(prevRoomOf, 0, prevRoomOf.Length);
             lastSeenHealth.Clear();
             noClampUntil.Clear();
             clearedSent.Clear();
@@ -689,6 +691,7 @@ namespace GungeonOnline
                 }
             }
 
+            TrackRemoteRooms(now);
             ApplyCorrections();
             FlushPendingDamage(now);
             ReportBothLead(now);
@@ -700,13 +703,17 @@ namespace GungeonOnline
                 return;
             nextStateAt = now + StateInterval;
 
-            List<int> ids = new List<int>();
-            List<AIActor> actors = new List<AIActor>();
+            // The same two lists every time (this runs 15 times a second), and the per-frame "do we lead this room"
+            // answer instead of working it out again for every enemy.
+            List<int> ids = stateIds;
+            List<AIActor> actors = stateActors;
+            ids.Clear();
+            actors.Clear();
             foreach (KeyValuePair<int, AIActor> pair in byId)
             {
                 AIActor a = pair.Value;
                 if (a != null && a.healthHaver != null && !a.healthHaver.IsDead && a.gameObject.activeInHierarchy
-                    && InCharge(a.ParentRoom) && !LowerPlayerInRoom(a.ParentRoom))
+                    && a.ParentRoom != null && LeadsEnemy(a))
                 {
                     ids.Add(pair.Key);
                     actors.Add(a);
@@ -722,6 +729,72 @@ namespace GungeonOnline
         }
 
         private const int MaxStatesPerMessage = 40;
+        private static readonly List<int> stateIds = new List<int>();
+        private static readonly List<AIActor> stateActors = new List<AIActor>();
+
+        // ---- Who may speak for a room (counted only, nothing is refused yet) ----
+        // Enemy positions, attacks and "room cleared" are accepted from any player, whoever leads the room. A check
+        // "the sender must be alive and in that room" would stop a game that is wrong about that from dragging
+        // enemies about or clearing rooms it isn't in - but it can also refuse honest messages: we only know where
+        // the others are from position updates that arrive a moment late (at a door, right after a warp into a
+        // fight). So for now it only counts what it WOULD refuse, once a minute in the log. If that stays at zero in
+        // normal play, MayLead can be made to refuse.
+        private static readonly RoomHandler[] lastRoomOf = new RoomHandler[Protocol.MaxPlayers];
+        private static readonly RoomHandler[] prevRoomOf = new RoomHandler[Protocol.MaxPlayers];
+        private static readonly float[] prevRoomUntil = new float[Protocol.MaxPlayers];
+        private static readonly int[] wouldRefuse = new int[Protocol.MaxPlayers];
+        private static readonly int[] leadMessages = new int[Protocol.MaxPlayers];
+
+        private static void TrackRemoteRooms(float now)
+        {
+            Dungeon d = GameManager.Instance.Dungeon;
+            string level = LevelSync.CurrentLevelKey();
+            foreach (RemotePlayerState p in session.Remotes)
+            {
+                if (p.Slot < 0 || p.Slot >= lastRoomOf.Length)
+                    continue;
+                RoomHandler room = null;
+                if (d != null && d.data != null && p.HasPlayer && p.Scene == level)
+                    room = d.data.GetAbsoluteRoomFromPosition(new IntVector2(Mathf.FloorToInt(p.FeetPosition.x), Mathf.FloorToInt(p.FeetPosition.y)));
+                if (room != lastRoomOf[p.Slot])
+                {
+                    prevRoomOf[p.Slot] = lastRoomOf[p.Slot];
+                    prevRoomUntil[p.Slot] = now + 2f;
+                    lastRoomOf[p.Slot] = room;
+                }
+            }
+        }
+
+        // Could this player be leading that room, as far as we can tell? The host always may (it also speaks for its
+        // stand-in and tells late arrivals which rooms are cleared). A guest: alive, on our floor, and in the room
+        // now, in it within the last two seconds, or within three tiles of it.
+        private static bool MayLead(int from, RoomHandler room)
+        {
+            if (from == 0 || room == null || room.area == null)
+                return true;
+            if (from < 0 || from >= Protocol.MaxPlayers)
+                return false;
+            RemotePlayerState p = session.Players[from];
+            if (!p.HasPlayer || p.IsDead || p.Scene != LevelSync.CurrentLevelKey())
+                return false;
+            if (lastRoomOf[from] == room)
+                return true;
+            if (prevRoomOf[from] == room && Time.realtimeSinceStartup < prevRoomUntil[from])
+                return true;
+            IntVector2 b = room.area.basePosition, s = room.area.dimensions;
+            Vector2 f = p.FeetPosition;
+            return f.x > b.x - 3f && f.x < b.x + s.x + 3f && f.y > b.y - 3f && f.y < b.y + s.y + 3f;
+        }
+
+        // Count one message that speaks for a room (see above). Never refuses.
+        public static void NoteLeadMessage(int from, RoomHandler room)
+        {
+            if (from < 0 || from >= Protocol.MaxPlayers)
+                return;
+            leadMessages[from]++;
+            if (!MayLead(from, room))
+                wouldRefuse[from]++;
+        }
 
         private static void SendStates(int level, List<int> ids, List<AIActor> actors, int first, int end)
         {
@@ -752,6 +825,14 @@ namespace GungeonOnline
             if (now < nextBothLeadReportAt)
                 return;
             nextBothLeadReportAt = now + 60f;
+            for (int i = 0; i < wouldRefuse.Length; i++)
+            {
+                if (wouldRefuse[i] > 0)
+                    Plugin.Log.LogInfo("Room messages from player " + (i + 1) + " in the last minute: " + leadMessages[i] + ", of which "
+                        + wouldRefuse[i] + " for a room that player doesn't seem to be in (counted only, not refused).");
+                wouldRefuse[i] = 0;
+                leadMessages[i] = 0;
+            }
             for (int i = 0; i < bothLead.Length; i++)
             {
                 if (bothLead[i] > 0)
@@ -778,6 +859,7 @@ namespace GungeonOnline
             CheckFloor();
             float now = Time.realtimeSinceStartup;
             float delay = OneWayDelay(session.From);
+            bool countedLead = false;
             for (int i = 0; i < count; i++)
             {
                 int id = r.ReadInt32();
@@ -796,6 +878,11 @@ namespace GungeonOnline
                 // alone rather than drag the wrong enemy around.
                 if (KindHash(a.EnemyGuid) != theirKind)
                     continue;
+                if (!countedLead)
+                {
+                    countedLead = true;
+                    NoteLeadMessage(session.From, a.ParentRoom);
+                }
                 // We lead that room ourselves (the lowest number in it): our copy is the one that counts. The sender
                 // thinks so too, so two games lead one room (briefly at a door is normal): counted for the log.
                 if (LeadsEnemy(a))
@@ -1072,6 +1159,7 @@ namespace GungeonOnline
                 return;
             RoomHandler room = rooms[roomIndex];
             CheckFloor();
+            NoteLeadMessage(session.From, room);
             clearedByOthers.Add(roomIndex);
 
             // Every enemy we know in that room counts as dead from now on (also ones that haven't spawned yet).

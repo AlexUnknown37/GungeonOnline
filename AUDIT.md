@@ -36,6 +36,8 @@ pass. Everything else is still *implemented and awaiting in-game verification*.
 | 4 (8 min) | same build, clean 960x540 windows | Fights, Bullet Bros boss room, team wipe, Quick Restart, guest "Restarting onto the host's new run", floor matched. **0 mod errors, 0 exceptions.** 1 missed break on each side |
 | 5 (12 min) | same build, Marine + Hunter | Bullet King room, wipe, restart, rejoin, the Hunter's dog shown on the other copy. 0 mod errors, 0 exceptions. 1 missed break on each side, again after the Quick Restart |
 | dice (8 min) | + attack dice (GO-37), diagnostic log | **All 91 dice keys the following copy used (8 bullet patterns, 83 gun shots) were identical to keys the leading copy used; it had none of its own.** 0 mod errors, 0 failed attack copies |
+| table-tops (9 + 4 min) | diagnostic copies | The earlier "560 of 560" list was taken during the loading screen, before tables are decorated: it held no table-top objects. Listed when the floor becomes playable instead: **53 of 53 table-top objects identical** on both copies (name and starting place) |
+| final (10 min) | everything in this file | Two boss rooms (Bullet Bros, Gatling Gull), two team wipes, two Quick Restarts with rejoin, floors matched each time. **0 mod errors, 0 exceptions, 0 failed attack copies, 0 part failures, 0 messages the sender check would have refused.** But **5 missed breaks per side**, all table-top objects: GO-42 did not remove them (see the correction below). Follower drift 0.05 to 0.25 tiles average in most minutes, 0.94 in one |
 
 Enemy drift on the following copy (the mod's own once-a-minute figure), at about 43 ms one-way delay:
 average 0.11 to 0.25 tiles before the following change, 0.14 to 0.39 after. That is **no measurable difference**
@@ -46,9 +48,16 @@ What the sessions did **not** exercise: Steam, three or four players, a human pl
 stand-in bot (no guest dropped), the exit elevator with a bot, a ghost host at an exit, the Master Round, a
 protected boss kill. Those fixes are implemented from the game code and still need a play-test.
 
-One thing the sessions keep showing and I could not explain: after a Quick Restart, one table-top object per
-session has a different colour in the two games at the same spot (the first floor of a session matched 560 of
-560). The floor fingerprint matches and the guest does build that floor from the host's progress.
+A correction to earlier versions of this file, and an item I could not close. I first wrote that after a Quick
+Restart one table-top object per session differed between the games. That was wrong: table-tops are identical
+(53 of 53, see the table). I then guessed the leftover "no unbroken match" lines were reports of objects that had
+already broken in the receiving game long before, and added GO-42 for that. The final session had 5 such lines
+per side, so that guess does not explain them either. What the logs do show: every one is a table-top object;
+the two games name different starting places for what looks like the same object (0.4 to 0.9 tiles apart); and
+the game itself destroys flung debris without breaking it ("Destroying large debris for being outside valid
+cell ranges" appears in the same logs), which leaves nothing to match. The effect is cosmetic: a book or an
+apple that is broken on one screen and gone or lying about on the other. Matching by starting place still took
+the miss rate from about half of all breaks to a few per session.
 
 ### Assumptions from the first pass, now checked in the game code
 
@@ -117,6 +126,15 @@ This is the README's "enemy bullets with random spread or homing can still diffe
 | GO-40 | Low-Med | D-2: copies rolled the bullet's own poison / fire / freeze / charm chances on top of what the shooter's game reported | switched off on copies (not for exploding bullets, whose explosion kind comes from the same marks) | ran clean |
 | GO-41 | Low | A partner's blank was triggered with *our* player as its user, so the game applied our blank items to it (ammo back for us, our Ammolet's effects on the enemies) | no user | code path |
 
+### Last additions (the "can do without a decision" group)
+
+| ID | What | Checked |
+|---|---|---|
+| GO-42 | Breaks are remembered for the whole floor (by name and starting place), not just for 10 seconds, so a late report of something long broken here is recognised | **did not reduce the misses** in the final session (5 per side); harmless, kept |
+| GO-43 | D-12: each part of the mod is started and run on its own (40 start-up calls, 35 per-frame calls). One part failing no longer silently leaves out every part after it at start-up, or skips the rest of each frame; the log names the part, at most once every 5 s | all parts start and run in the sessions |
+| GO-44 | D-4, **counting only**: for every enemy-position, attack and room-cleared message the mod now checks whether the sender could be leading that room (alive, on our floor, in the room now or within the last 2 s, or within 3 tiles) and logs once a minute how many it *would* have refused. Nothing is refused. If that stays at zero in normal play, `EnemySync.MayLead` can be switched to refuse | see the final session row |
+| GO-45 | P-11: the 15-times-a-second enemy report reuses its lists and the per-frame "do we lead this room" answer; an unknown status effect triggers one new search of all items, not one every 10 s for as long as it keeps coming | ran clean |
+
 Not done from this part: sending a teleport's destination (it differs when it depends on each game's camera),
 bullets some items and companions fire that bypass the shot hooks (the damage still arrives, the picture is
 missing: thrown guns, the Shadow Clone, bank-fired companion shots, beams from anything but the gun in hand),
@@ -130,7 +148,7 @@ the exit leads); old hosts ignore it and a new host accepts its absence. `Protoc
 | ID | What | Why it waits |
 |---|---|---|
 | D-3 step 2 | Enemy numbers still depend on each game's spawn order. A design exists: enemies made by `AIActor.Spawn` (summons, split blobs, spawn-on-death) get a number from room + parent + kind in a separate range, so a one-sided spawn shifts nothing | changes what a number means: needs a `Protocol.Version` bump and a test with summoners |
-| D-4 | Receivers don't check that the sender leads the room. A check with door slack is designed | false rejects are possible right after a fight-pull warp; add it log-only first |
+| D-4 | Receivers don't refuse messages from a player who doesn't lead the room. The check exists and counts (GO-44) | switch it on once the counts from real play stay at zero |
 | D-5 | Remembered gear keyed by a name the client sends | design choice |
 | D-2 rest | Bullet copies still roll their own status-effect dice; transmogrify is not synced | touches how items feel |
 | S-1 | *(done: see "Enemy attacks and bullets" above.)* What remains there: aimed patterns still aim at each game's own view of the target; enemy homing rockets home on each game's own player | cosmetic / design decision |
@@ -572,4 +590,5 @@ Blind spots:
 | `625756b` | GO-25 … GO-36 |
 | `b98eb5e` | second-pass section of this file |
 | `4dc124d` | GO-37 … GO-41 |
-| (this commit) | this file: enemy attacks and bullets |
+| `c180045` | this file: enemy attacks and bullets |
+| (this commit) | GO-42 … GO-45 |

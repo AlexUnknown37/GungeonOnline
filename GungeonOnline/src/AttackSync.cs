@@ -262,6 +262,7 @@ namespace GungeonOnline
                 return;
             }
 
+            EnemySync.NoteLeadMessage(session.From, a.ParentRoom);
             // Same spot, same target as in the leader's game.
             EnemySync.PlaceAt(a, pos);
             TargetSync.Force(a, target);
