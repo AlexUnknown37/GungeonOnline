@@ -673,6 +673,7 @@ namespace GungeonOnline
             try
             {
                 SaveSync.EndBorrow("game closing"); // never quit with the host's progress in place
+                GameModeSync.RestoreOwn();          // ... or the host's Turbo / Rainbow choice in our save
             }
             finally
             {

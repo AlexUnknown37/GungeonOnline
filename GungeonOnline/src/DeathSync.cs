@@ -90,9 +90,11 @@ namespace GungeonOnline
             {
                 if (!Connected)
                     return false;
+                // On our floor only, like the revive itself: a chest must not be used up for someone it can't reach.
+                string level = LevelSync.CurrentLevelKey();
                 foreach (RemotePlayerState r in session.Remotes)
                 {
-                    if (r.HasPlayer && r.IsDead)
+                    if (r.HasPlayer && r.IsDead && r.Scene == level)
                         return true;
                 }
                 return false;
@@ -120,6 +122,7 @@ namespace GungeonOnline
                 Plugin.Log.LogInfo(PartnerAliveHere ? "We died; another player is alive, so we become a ghost until they open a chest."
                     : "We died; we become a ghost and the host checks whether anyone is still standing.");
                 bool falling = (bool)isFallingField.GetValue(__instance);
+                onlineGhost = true;
                 __instance.StartCoroutine(__instance.HandleCoopDeath(falling));
                 session.SendReliable(MsgType.PlayerDied, null);
                 return false;
@@ -167,12 +170,24 @@ namespace GungeonOnline
         // cancels it), it ends the run for all (TeamWiped). Without a host any more, a lone ghost ends its own run.
         private const float AllDeadGrace = 1.5f;   // seconds everyone must be down before the host ends the run
         private const float PartnerGoneGrace = 3f; // a ghost whose partner disconnected
+        private const float ReconnectGrace = 30f;  // ... or whose connection is being retried (Steam): give it time
         private static float allDeadSince = -1f;
+        // We became a ghost through this mod (online). The game's own local co-op makes ghosts too, and those are
+        // none of our business: without this, player 1 dying in an offline couch co-op run got a forced game over
+        // three seconds later while player 2 was still alive.
+        private static bool onlineGhost;
 
         public static void Update()
         {
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+            if (me != null && !me.IsGhost && me.healthHaver != null && !me.healthHaver.IsDead)
+                onlineGhost = false; // alive (again)
             if (me == null || !me.IsGhost || gameOverStarted || GameManager.Instance.IsLoadingLevel)
+            {
+                allDeadSince = -1f;
+                return;
+            }
+            if (!Connected && !onlineGhost)
             {
                 allDeadSince = -1f;
                 return;
@@ -197,7 +212,8 @@ namespace GungeonOnline
                 allDeadSince = now;
                 return;
             }
-            if (now - allDeadSince >= (Connected ? AllDeadGrace : PartnerGoneGrace))
+            bool retrying = !Connected && session != null && session.Status == NetSession.State.Connecting;
+            if (now - allDeadSince >= (Connected ? AllDeadGrace : retrying ? ReconnectGrace : PartnerGoneGrace))
             {
                 Plugin.Log.LogInfo(Connected ? "Every player is down: game over for all." : "We're a ghost and everyone else is gone: game over.");
                 if (Connected)
@@ -244,6 +260,7 @@ namespace GungeonOnline
         // A new life (new run or revived) can game-over again later.
         public static void ResetGameOver()
         {
+            onlineGhost = false;
             gameOverStarted = false;
         }
 

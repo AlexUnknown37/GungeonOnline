@@ -1415,6 +1415,7 @@ namespace GungeonOnline
         {
             // Don't leave a shared seed behind, or every later solo run would get the same dungeon.
             LevelSync.ResetSeed();
+            LevelSync.OnSessionEnded();
             foreach (RemotePlayerState p in Players)
                 p.Reset();
             RebuildRemotes();
@@ -1448,6 +1449,17 @@ namespace GungeonOnline
                     return;
                 Plugin.Log.LogWarning("Player " + (slot + 1) + " (" + name + ") disconnected: " + reason);
                 Toast.Show(name + " left the game.", 4f);
+                // If they had the pause menu open, nobody is going to send the "unpaused" for them: do it here, in
+                // their name. (With a stand-in taking their slot, the other guests otherwise stayed frozen.)
+                Protocol.SendAs = slot;
+                try
+                {
+                    SendReliable(MsgType.Paused, delegate (BinaryWriter w) { w.Write(false); });
+                }
+                finally
+                {
+                    Protocol.SendAs = -1;
+                }
                 StandIn.OnGuestLeft(slot, name, key, last);
                 SendRoster();
                 // The host keeps its lobby / port open so friends can come (back). Mid-run the seed stays, so a

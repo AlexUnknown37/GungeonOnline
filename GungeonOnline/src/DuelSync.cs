@@ -127,7 +127,9 @@ namespace GungeonOnline
 
         public static void OnDuelRequest()
         {
-            if (session.Link.IsHost && GameManager.HasInstance && !inArena && !GameManager.Instance.IsLoadingLevel)
+            // Only from a player who is in the run with us, on our floor (the gun is fired at the end of a run).
+            if (session.Link.IsHost && GameManager.HasInstance && !inArena && !GameManager.Instance.IsLoadingLevel
+                && !GameManager.Instance.IsFoyer && session.Remote.HasPlayer && session.Remote.Scene == LevelSync.CurrentLevelKey())
             {
                 Plugin.Log.LogInfo(session.PeerName + " fired the Gun That Can Kill The Past: everyone goes to the duel.");
                 StartDuel(GameManager.Instance);
@@ -185,6 +187,10 @@ namespace GungeonOnline
             {
                 InPrivatePast = false;
                 duelStarted = false;
+                // Back in the Breach, nothing of the last duel is pending any more (a leftover "back to the Breach"
+                // timer threw the guest out of the next run's first floor).
+                toBreachAt = -1f;
+                privateLoad = false;
                 StopSpectating(gm.PrimaryPlayer);
                 Leave();
                 return;
