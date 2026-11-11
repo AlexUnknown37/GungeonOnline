@@ -75,6 +75,7 @@ namespace GungeonOnline
             floor = d;
             partnerHitRooms.Clear();
             sentHitRooms.Clear();
+            sentBotHitRooms.Clear();
             guns.Clear();
         }
 
@@ -212,17 +213,67 @@ namespace GungeonOnline
         [HarmonyPatch(typeof(PlayerController), "Damaged")]
         private static void AfterPlayerDamaged(PlayerController __instance)
         {
-            if (!Connected || __instance != Me || __instance.CurrentRoom == null || GameManager.Instance.Dungeon == null)
+            // The host's stand-in too, in its player's name: guests count it as a player, and it never said it was hit.
+            bool isBot = StandIn.Active && __instance == StandIn.Player;
+            if (!Connected || (!isBot && __instance != Me) || __instance.CurrentRoom == null || GameManager.Instance.Dungeon == null)
                 return;
             CheckFloor();
             int roomIndex = GameManager.Instance.Dungeon.data.rooms.IndexOf(__instance.CurrentRoom);
-            if (roomIndex < 0 || !sentHitRooms.Add(roomIndex))
+            if (roomIndex < 0 || !(isBot ? sentBotHitRooms : sentHitRooms).Add(roomIndex))
                 return;
             string level = LevelSync.CurrentLevelKey();
-            session.SendReliable(MsgType.HitInRoom, delegate (BinaryWriter w)
+            if (isBot)
+                Protocol.SendAs = StandIn.Slot;
+            try
             {
-                w.Write(level); w.Write(roomIndex);
-            });
+                session.SendReliable(MsgType.HitInRoom, delegate (BinaryWriter w)
+                {
+                    w.Write(level); w.Write(roomIndex);
+                });
+            }
+            finally
+            {
+                if (isBot)
+                    Protocol.SendAs = -1;
+            }
+        }
+
+        private static readonly HashSet<int> sentBotHitRooms = new HashSet<int>();
+
+        // The Master Round itself is decided in RoomHandler.HandleBossClearReward, from the same "a player got hit
+        // here" mark - not in the boss's loot drop, where the switch below it sits (there the mark only doubles the
+        // credits). So a hit player never got the Master Round from an unhit partner. Same switch, right place.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(RoomHandler), "HandleBossClearReward")]
+        private static void BeforeBossReward(RoomHandler __instance, out bool __state)
+        {
+            __state = false;
+            if (!Connected || !__instance.PlayerHasTakenDamageInThisRoom || !PartnerHere || GameManager.Instance.Dungeon == null)
+                return;
+            CheckFloor();
+            int roomIndex = GameManager.Instance.Dungeon.data.rooms.IndexOf(__instance);
+            if (roomIndex < 0)
+                return;
+            string level = LevelSync.CurrentLevelKey();
+            foreach (RemotePlayerState p in session.Remotes)
+            {
+                if (p.HasPlayer && !p.IsDead && p.Scene == level && RoomAt(p.FeetPosition) == __instance
+                    && !partnerHitRooms.Contains(roomIndex * Protocol.MaxPlayers + p.Slot))
+                {
+                    Plugin.Log.LogInfo(p.Name + " beat the boss without getting hit: the Master Round drops for us too.");
+                    __instance.PlayerHasTakenDamageInThisRoom = false;
+                    __state = true;
+                    return;
+                }
+            }
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(RoomHandler), "HandleBossClearReward")]
+        private static void AfterBossReward(RoomHandler __instance, bool __state)
+        {
+            if (__state)
+                __instance.PlayerHasTakenDamageInThisRoom = true;
         }
 
         public static void OnHitInRoom(BinaryReader r)
@@ -466,7 +517,14 @@ namespace GungeonOnline
                 if (p.HasPlayer && !p.Scene.StartsWith("tt_foyer"))
                     n++;
             }
+            if (BotInRun())
+                n++; // guests see the stand-in's slot as a player; count it here too, or the shares don't add up
             return n;
+        }
+
+        private static bool BotInRun()
+        {
+            return session.Link != null && session.Link.IsHost && StandIn.Active && StandIn.Player != null;
         }
 
         // ---- The shared purse ----
@@ -508,6 +566,16 @@ namespace GungeonOnline
                 return;
             if (session.Link.IsHost)
             {
+                if (pendingMoney != 0 || pendingKeys != 0)
+                {
+                    int pm = pendingMoney, pk = pendingKeys;
+                    pendingMoney = pendingKeys = 0;
+                    if (pendingOwner == me && GameUIRoot.Instance != null)
+                    {
+                        ApplyGuestChange(me, pm, pk); // what guests spent or found while we were loading
+                        return;
+                    }
+                }
                 // The host's purse is the real one: tell everyone when it changes, and now and then anyway.
                 float now = Time.realtimeSinceStartup;
                 if (c.Currency != sentMoney || c.KeyBullets != sentKeys || now >= nextWalletStateAt)
@@ -542,8 +610,30 @@ namespace GungeonOnline
             // Keep a guest's numbers in a sane range (a huge one would wrap around).
             int dm = Mathf.Clamp(r.ReadInt32(), -9999, 9999), dk = Mathf.Clamp(r.ReadInt32(), -99, 99);
             PlayerController me = Me;
-            if (me == null || !session.Link.IsHost || !InRunNow())
+            if (me == null || session.Link == null || !session.Link.IsHost || !GameManager.HasInstance || GameManager.Instance.IsFoyer)
                 return;
+            // On a loading screen the purse can't be written (the key counter's setter needs the HUD, which isn't
+            // there during a load), and the change used to be dropped: the guest had spent, the purse hadn't. Keep
+            // it until we're back in the run.
+            if (GameManager.Instance.IsLoadingLevel || GameUIRoot.Instance == null)
+            {
+                if (pendingOwner != me)
+                {
+                    pendingOwner = me;
+                    pendingMoney = pendingKeys = 0;
+                }
+                pendingMoney = Mathf.Clamp(pendingMoney + dm, -9999, 9999);
+                pendingKeys = Mathf.Clamp(pendingKeys + dk, -99, 99);
+                return;
+            }
+            ApplyGuestChange(me, dm, dk);
+        }
+
+        private static int pendingMoney, pendingKeys;
+        private static PlayerController pendingOwner;
+
+        private static void ApplyGuestChange(PlayerController me, int dm, int dk)
+        {
             PlayerConsumables c = me.carriedConsumables;
             c.Currency = Mathf.Max(0, c.Currency + dm);
             c.KeyBullets = Mathf.Max(0, c.KeyBullets + dk);
@@ -603,7 +693,8 @@ namespace GungeonOnline
         {
             if (!bossDropping || __2 || !session.HalfMoney || !InSharedRun())
                 return;
-            float share = __1 / (float)PlayersInRun() + moneyCarry;
+            // The stand-in has no game of its own to drop its share in: the host's game drops it.
+            float share = __1 * (BotInRun() ? 2f : 1f) / (float)PlayersInRun() + moneyCarry;
             int give = Mathf.FloorToInt(share);
             moneyCarry = share - give;
             __1 = give;

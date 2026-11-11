@@ -923,7 +923,7 @@ namespace GungeonOnline
 
                     case MsgType.AtExit:
                         if (Link.IsHost)
-                            LevelSync.OnPartnerAtExit();
+                            LevelSync.OnPartnerAtExit(r);
                         break;
 
                     case MsgType.ModSettings:

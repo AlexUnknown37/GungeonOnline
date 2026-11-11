@@ -94,11 +94,38 @@ namespace GungeonOnline
                 string level = LevelSync.CurrentLevelKey();
                 foreach (RemotePlayerState r in session.Remotes)
                 {
-                    if (r.HasPlayer && r.IsDead && r.Scene == level)
+                    if (RevivableGhost(r, level))
                         return true;
                 }
                 return false;
             }
+        }
+
+        // Players who were down when the host called the team wipe: on their death screen, not ghosts a chest can
+        // bring back, until we see them alive again (their next run).
+        private static readonly bool[] wiped = new bool[Protocol.MaxPlayers];
+
+        private static void MarkWiped()
+        {
+            foreach (RemotePlayerState r in session.Remotes)
+            {
+                if (r.IsDead && r.Slot >= 0 && r.Slot < wiped.Length)
+                    wiped[r.Slot] = true;
+            }
+        }
+
+        // A ghost a chest or a boss kill can bring back: on our floor, not on a death screen, and done with the dying
+        // animation (the game only makes the ghost when that ends; a revive sent before does nothing). A chest opened
+        // for anyone else used to be used up and bring nobody back.
+        private static bool RevivableGhost(RemotePlayerState r, string level)
+        {
+            if (r == null || !r.HasPlayer || !r.IsDead || r.Scene != level)
+                return false;
+            if (r.Slot >= 0 && r.Slot < wiped.Length && wiped[r.Slot])
+                return false;
+            if (r.Clip != null && r.Clip.StartsWith("death"))
+                return false; // "death_coop": still dying; "death_shot": the game-over scene
+            return true;
         }
 
         // ---- Dying ----
@@ -179,6 +206,16 @@ namespace GungeonOnline
 
         public static void Update()
         {
+            if (session != null)
+            {
+                bool on = Connected;
+                for (int i = 0; i < wiped.Length; i++)
+                {
+                    RemotePlayerState s = session.Players[i];
+                    if (!on || !s.HasPlayer || !s.IsDead)
+                        wiped[i] = false;
+                }
+            }
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             if (me != null && !me.IsGhost && me.healthHaver != null && !me.healthHaver.IsDead)
                 onlineGhost = false; // alive (again)
@@ -218,7 +255,10 @@ namespace GungeonOnline
             {
                 Plugin.Log.LogInfo(Connected ? "Every player is down: game over for all." : "We're a ghost and everyone else is gone: game over.");
                 if (Connected)
+                {
+                    MarkWiped();
                     session.SendReliable(MsgType.TeamWiped, null);
+                }
                 ForceGameOver();
             }
         }
@@ -228,6 +268,7 @@ namespace GungeonOnline
             if (session.From != 0 || DuelSync.InPrivatePast)
                 return; // only the host ends the run (an older game may still send this on its own); never in our past
             Plugin.Log.LogInfo("The host says every player is down: game over.");
+            MarkWiped();
             ForceGameOver();
         }
 
@@ -330,7 +371,7 @@ namespace GungeonOnline
             float bestDist = float.MaxValue;
             foreach (RemotePlayerState r in session.Remotes)
             {
-                if (!r.HasPlayer || !r.IsDead || r.Scene != level)
+                if (!RevivableGhost(r, level))
                     continue;
                 float d = Vector2.Distance(user.CenterPosition, r.Position);
                 if (d < bestDist)
@@ -375,7 +416,8 @@ namespace GungeonOnline
             if (target != Protocol.NoSlot && target != session.LocalSlot)
                 return; // someone else is being brought back
             PlayerController p = GameManager.Instance.PrimaryPlayer;
-            if (p == null || !p.IsGhost)
+            // Not once our game over has begun: after a team wipe we are still "a ghost" behind the death screen.
+            if (p == null || !p.IsGhost || gameOverStarted || LevelSync.DeathPageUp())
                 return;
             Plugin.Log.LogInfo(fromBoss ? session.PeerName + " beat the boss or used a revive: coming back to life." : session.PeerName + " opened a chest: coming back to life.");
             if (!fromBoss)

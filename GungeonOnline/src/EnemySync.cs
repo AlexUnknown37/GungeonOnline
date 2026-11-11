@@ -27,7 +27,10 @@ namespace GungeonOnline
         private static readonly Dictionary<AIActor, int> idOf = new Dictionary<AIActor, int>();
         private static readonly Dictionary<int, AIActor> byId = new Dictionary<int, AIActor>();
         private static readonly Dictionary<RoomHandler, int> roomCounters = new Dictionary<RoomHandler, int>();
-        private static readonly HashSet<int> deadIds = new HashSet<int>();
+        // Enemies known dead on this floor: number -> which kind of enemy it was. The kind matters: numbers come from
+        // the order each game made its enemies in, so after a spawn that only one game had, a number can belong to
+        // a different enemy here - and "dead number 12003" must not kill whatever else got that number.
+        private static readonly Dictionary<int, int> deadIds = new Dictionary<int, int>();
         private static readonly List<AIActor> killQueue = new List<AIActor>();
         private static readonly Dictionary<AIActor, float> queuedAt = new Dictionary<AIActor, float>();
         private static float nextStateAt;
@@ -71,6 +74,10 @@ namespace GungeonOnline
             driven.Clear();
             driveVelocity.Clear();
             hadOverride.Clear();
+            pendingDamage.Clear();
+            pendingGuid.Clear();
+            lastSeenHealth.Clear();
+            noClampUntil.Clear();
             clearedSent.Clear();
             clearedByOthers.Clear();
         }
@@ -95,7 +102,8 @@ namespace GungeonOnline
             int id = roomIndex * 1000 + counter;
             idOf[enemy] = id;
             byId[id] = enemy;
-            if (deadIds.Contains(id))
+            int deadKind;
+            if (deadIds.TryGetValue(id, out deadKind) && deadKind == KindHash(enemy.EnemyGuid))
             {
                 killQueue.Add(enemy); // the partner already killed this one
                 queuedAt[enemy] = Time.realtimeSinceStartup;
@@ -204,9 +212,98 @@ namespace GungeonOnline
             }
         }
 
+        // ---- Damage that only exists in the game of the player who dealt it ----
+        // A bullet's damage is sent hit by hit (above). Beams, sword swings, dodge rolls into enemies and a few
+        // items damage enemies without any bullet, and only in their owner's game (the others see a picture of the
+        // player, not a player). It was never sent: for a player not leading the room, an enemy took no damage on
+        // anyone else's screen and then died all at once. It is added up per enemy and sent ten times a second.
+        // Only for enemies we do NOT lead: the leader's own health reports already carry what the leader deals.
+        public static bool BeamHitting;       // a beam of a player in this game is doing its damage step
+        public static bool OwnerOnlyHitting;  // ... or a sword swing
+        private static readonly Dictionary<int, float> pendingDamage = new Dictionary<int, float>();
+        private static readonly Dictionary<int, string> pendingGuid = new Dictionary<int, string>();
+        private static float nextPendingFlushAt;
+        // The names the game gives such damage (HealthHaver.ApplyDamage's sourceName).
+        private static readonly HashSet<string> ownerOnlySources = NewOwnerOnlySources();
+
+        private static HashSet<string> NewOwnerOnlySources()
+        {
+            HashSet<string> s = new HashSet<string>();
+            s.Add("DODGEROLL"); s.Add("DODGEROLL OF AWESOME"); s.Add("Knife Shield"); s.Add("Orbital Shield");
+            s.Add("Aura"); s.Add("Katana"); s.Add("Hero's Sword"); s.Add("Ser Junkan"); s.Add("Wolf");
+            return s;
+        }
+
+        // A beam fired by a player who really is in this game (us, the stand-in, a companion of either) - not one of
+        // the copies drawn for other players' beams, which have us as owner but deal nothing.
+        private static bool OursToReport(BeamController b)
+        {
+            if (b == null || BeamSync.IsCopy(b))
+                return false;
+            GameActor o = b.Owner;
+            PlayerController p = o as PlayerController;
+            if (p == null)
+            {
+                AIActor c = o as AIActor;
+                p = c != null ? c.CompanionOwner : null;
+            }
+            return p != null;
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(BasicBeamController), "FrameUpdate")]
+        private static void BeforeBeamFrame(BasicBeamController __instance) { BeamHitting = Connected && OursToReport(__instance); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(BasicBeamController), "FrameUpdate")]
+        private static System.Exception AfterBeamFrame(System.Exception __exception) { BeamHitting = false; return __exception; }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(RaidenBeamController), "Update")]
+        private static void BeforeRaidenBeam(RaidenBeamController __instance) { BeamHitting = Connected && OursToReport(__instance); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(RaidenBeamController), "Update")]
+        private static System.Exception AfterRaidenBeam(System.Exception __exception) { BeamHitting = false; return __exception; }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(ReverseBeamController), "Update")]
+        private static void BeforeReverseBeam(ReverseBeamController __instance) { BeamHitting = Connected && OursToReport(__instance); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(ReverseBeamController), "Update")]
+        private static System.Exception AfterReverseBeam(System.Exception __exception) { BeamHitting = false; return __exception; }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(Gun), "DealSwordDamageToEnemy")]
+        private static void BeforeSwordHit() { OwnerOnlyHitting = Connected; }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(Gun), "DealSwordDamageToEnemy")]
+        private static System.Exception AfterSwordHit(System.Exception __exception) { OwnerOnlyHitting = false; return __exception; }
+
+        private static void FlushPendingDamage(float now)
+        {
+            if (pendingDamage.Count == 0 || now < nextPendingFlushAt)
+                return;
+            nextPendingFlushAt = now + 0.1f;
+            int level = LevelSync.CurrentLevelCode();
+            foreach (KeyValuePair<int, float> pair in pendingDamage)
+            {
+                int id = pair.Key;
+                float amount = pair.Value;
+                string guid = pendingGuid[id];
+                AIActor a;
+                if (amount <= 0f || !byId.TryGetValue(id, out a) || a == null || a.healthHaver == null || a.healthHaver.IsDead)
+                    continue; // died meanwhile: its death was sent
+                session.SendReliable(MsgType.EnemyDamage, delegate (BinaryWriter w)
+                {
+                    w.Write(level); w.Write(id); w.Write(guid); w.Write(amount);
+                });
+            }
+            pendingDamage.Clear();
+            pendingGuid.Clear();
+        }
+
         [HarmonyPostfix]
         [HarmonyPatch(typeof(HealthHaver), "ApplyDamage")]
-        private static void AfterApplyDamage(HealthHaver __instance, DamageCategory __4, float __state)
+        private static void AfterApplyDamage(HealthHaver __instance, string __2, DamageCategory __4, float __state)
         {
             if (applyingRemote || !Connected || __instance.aiActor == null || __state < 0f)
                 return;
@@ -218,11 +315,10 @@ namespace GungeonOnline
             string guid = __instance.aiActor.EnemyGuid;
             if (__instance.IsDead)
             {
-                deadIds.Add(id);
-                // Burning or poison ticks in every game at once: then only the room leader's game reports the death.
-                // Anything else that kills here (our bullet, explosion, companion) is ours to report.
-                if (__4 == DamageCategory.DamageOverTime && !LocalBulletHitting && !LeadsEnemy(__instance.aiActor))
-                    return;
+                deadIds[id] = KindHash(guid);
+                // Every death here is reported, burning and poison included. (Those used to be left to the room
+                // leader, on the idea that they tick in every game alike - but an effect that only landed in our
+                // game then killed the enemy here and nowhere else. A second report of the same death does nothing.)
                 session.SendReliable(MsgType.EnemyDied, delegate (BinaryWriter w)
                 {
                     w.Write(level); w.Write(id); w.Write(guid);
@@ -234,6 +330,14 @@ namespace GungeonOnline
                 {
                     w.Write(level); w.Write(id); w.Write(guid); w.Write(dealt);
                 });
+            }
+            else if (dealt > 0f && (BeamHitting || OwnerOnlyHitting || (__2 != null && ownerOnlySources.Contains(__2)))
+                && !LeadsEnemy(__instance.aiActor))
+            {
+                float sum;
+                pendingDamage.TryGetValue(id, out sum);
+                pendingDamage[id] = sum + dealt;
+                pendingGuid[id] = guid;
             }
         }
 
@@ -248,7 +352,7 @@ namespace GungeonOnline
             CheckFloor();
             AIActor a = Find(id, guid);
             if (a != null)
-                ApplyRemoteDamage(a, amount);
+                ApplyRemoteDamage(a, amount, false);
         }
 
         public static void OnEnemyDied(BinaryReader r)
@@ -259,7 +363,7 @@ namespace GungeonOnline
             if (level != LevelSync.CurrentLevelCode())
                 return;
             CheckFloor();
-            deadIds.Add(id);
+            deadIds[id] = KindHash(guid);
             AIActor a = Find(id, guid);
             if (a != null)
                 KillFromPartner(a);
@@ -297,7 +401,7 @@ namespace GungeonOnline
             if (remotelyKilled.Count > 500)
                 remotelyKilled.Clear();
             remotelyKilled.Add(a);
-            ApplyRemoteDamage(a, KillHealth);
+            ApplyRemoteDamage(a, KillHealth, true);
             if (a == null || a.healthHaver == null || !a.healthHaver.IsDead)
             {
                 remotelyKilled.Remove(a);
@@ -322,22 +426,69 @@ namespace GungeonOnline
                     }
                     else if (until > 0f)
                     {
-                        killRetryUntil[a] = -1f; // gave up: said once, not again
-                        Plugin.Log.LogWarning("Couldn't kill " + a.name + " here although it died in another game (it can't take damage).");
+                        // Still alive after the retries: something protects it for longer (a boss kept at a minimum
+                        // health until its own script lets go, armor). It is dead in the other game, so take the
+                        // protection away - what the game itself does for its own forced kills (pits, the boss kill
+                        // camera). Not in the middle of a scripted moment (an intro; a boss whose AI is switched off
+                        // for a transition): wait for that to end, but not for ever.
+                        BehaviorSpeculator spec = a.behaviorSpeculator;
+                        bool scripted = GameManager.IsBossIntro || (a.healthHaver.IsBoss && spec != null && !spec.enabled);
+                        if (scripted && now < until + ForceKillPatience)
+                        {
+                            if (!killQueue.Contains(a))
+                            {
+                                killQueue.Add(a);
+                                queuedAt[a] = now - 1f; // look again in half a second
+                            }
+                        }
+                        else
+                        {
+                            killRetryUntil[a] = -1f; // one go; said once if that fails too
+                            if (!ForceKill(a))
+                                Plugin.Log.LogWarning("Couldn't kill " + a.name + " here although it died in another game.");
+                        }
                     }
                 }
             }
         }
 
+        private const float ForceKillPatience = 20f;
+
+        private static bool ForceKill(AIActor a)
+        {
+            HealthHaver h = a.healthHaver;
+            if (h == null)
+                return false;
+            if (h.IsDead)
+                return true;
+            Plugin.Log.LogInfo(a.name + " died in another game but is protected here: forcing it.");
+            h.minimumHealth = 0f;
+            h.PreventAllDamage = false;
+            h.IsVulnerable = true;
+            h.NextDamageIgnoresArmor = true;
+            h.Armor = 0f;
+            if (h.healthIsNumberOfHits)
+                h.ForceSetCurrentHealth(1f); // the hit below counts as exactly one
+            remotelyKilled.Add(a);
+            ApplyRemoteDamage(a, KillHealth, true);
+            if (!h.IsDead)
+                remotelyKilled.Remove(a);
+            return h.IsDead;
+        }
+
         private const float KillRetrySeconds = 10f;
         private static readonly Dictionary<AIActor, float> killRetryUntil = new Dictionary<AIActor, float>();
 
-        private static void ApplyRemoteDamage(AIActor a, float amount)
+        // kill: the blow that ends an enemy which died in another game. It goes in as "unstoppable" boss damage, the
+        // game's own way past "takes no damage right now" and "only special damage counts".
+        private static void ApplyRemoteDamage(AIActor a, float amount, bool kill)
         {
             applyingRemote = true;
             try
             {
-                a.healthHaver.ApplyDamage(amount, Vector2.zero, "Partner", CoreDamageTypes.None, DamageCategory.Normal, true, null, true);
+                a.healthHaver.ApplyDamage(amount, Vector2.zero, "Partner",
+                    kill ? CoreDamageTypes.SpecialBossDamage : CoreDamageTypes.None,
+                    kill ? DamageCategory.Unstoppable : DamageCategory.Normal, true, null, true);
             }
             finally
             {
@@ -438,6 +589,8 @@ namespace GungeonOnline
             }
         }
         private static readonly Dictionary<AIActor, Correction> corrections = new Dictionary<AIActor, Correction>();
+        private static readonly Dictionary<AIActor, float> lastSeenHealth = new Dictionary<AIActor, float>();
+        private static readonly Dictionary<AIActor, float> noClampUntil = new Dictionary<AIActor, float>();
         private const float SnapDistance = 4f;      // further than this: jump
         private const float SettleDistance = 0.25f; // closer than this: leave it alone
         private const float PullSpeed = 6f;         // how quickly a drifted enemy glides back
@@ -537,6 +690,7 @@ namespace GungeonOnline
             }
 
             ApplyCorrections();
+            FlushPendingDamage(now);
             ReportBothLead(now);
             UnsealIfStuck(now);
             KeepClearedRoomOpen(now);
@@ -650,9 +804,15 @@ namespace GungeonOnline
                     continue;
                 }
 
-                // Health only ever goes down to theirs (our own hits may not have reached them yet).
-                if (theirHealth < a.healthHaver.GetCurrentHealth())
+                // Health only ever goes down to theirs (our own hits may not have reached them yet). Unless our copy
+                // was just healed (a Bullet Bro enraging, a Shelleton coming back...): the leader's copy does the
+                // same a moment apart, and its older, lower number must not undo ours meanwhile.
+                float mine = a.healthHaver.GetCurrentHealth(), seen, hold;
+                if (lastSeenHealth.TryGetValue(a, out seen) && mine > seen + 0.01f)
+                    noClampUntil[a] = now + 1f;
+                if (theirHealth < mine && !(noClampUntil.TryGetValue(a, out hold) && now < hold))
                     a.healthHaver.ForceSetCurrentHealth(theirHealth);
+                lastSeenHealth[a] = a.healthHaver.GetCurrentHealth();
                 // Chase the same player as in the sender's game.
                 TargetSync.Force(a, theirTarget);
 
@@ -918,7 +1078,7 @@ namespace GungeonOnline
             foreach (KeyValuePair<AIActor, int> pair in idOf)
             {
                 if (pair.Key != null && pair.Key.ParentRoom == room)
-                    deadIds.Add(pair.Value);
+                    deadIds[pair.Value] = KindHash(pair.Key.EnemyGuid);
             }
             List<AIActor> left = room.GetActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear);
             int killed = 0;

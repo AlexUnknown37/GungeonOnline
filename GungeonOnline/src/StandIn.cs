@@ -472,6 +472,45 @@ namespace GungeonOnline
                 __result = 0f;
         }
 
+        // The game's two-player rule: the exit elevator leaves only when every living local player stands on it. The
+        // stand-in is "player two" and only follows the host loosely, so the host could wait there for ever. While
+        // the host stands on the elevator, the stand-in doesn't have to (the regular and the cryo elevator).
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(ElevatorDepartureController), "OnElevatorTriggerEnter")]
+        private static void BeforeElevatorTrigger(SpeculativeRigidbody __1, out bool __state)
+        {
+            __state = false;
+            if (bot == null || __1 == null || !GameManager.HasInstance)
+                return;
+            GameManager gm = GameManager.Instance;
+            PlayerController host = gm.PrimaryPlayer;
+            if (gm.CurrentGameType != GameManager.GameType.COOP_2_PLAYER || host == null)
+                return;
+            Vector3 feet = host.SpriteBottomCenter;
+            if (!__1.ContainsPoint(new Vector2(feet.x, feet.y), int.MaxValue, true))
+                return; // only the bot is on it: the game's own rule stays (it waits for the host)
+            gm.CurrentGameType = GameManager.GameType.SINGLE_PLAYER;
+            __state = true;
+        }
+
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(ElevatorDepartureController), "OnElevatorTriggerEnter")]
+        private static System.Exception AfterElevatorTrigger(bool __state, System.Exception __exception)
+        {
+            if (__state && GameManager.HasInstance && bot != null)
+                GameManager.Instance.CurrentGameType = GameManager.GameType.COOP_2_PLAYER;
+            return __exception;
+        }
+
+        // In two-player mode nobody may walk further off screen. The camera ignores the stand-in, so off screen it
+        // could not move at all (not even around a wall back to the host).
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(PlayerController), "CameraBoundsMovementRestrictor")]
+        private static bool BeforeCameraBounds(PlayerController __instance)
+        {
+            return bot == null || __instance != bot;
+        }
+
         // A run ending (back to the Breach, a new run, the title) ends the stand-in too.
         [HarmonyPrefix]
         [HarmonyPatch(typeof(GameManager), "ClearActiveGameData")]

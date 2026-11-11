@@ -12,7 +12,14 @@ namespace GungeonOnline
         private const string Label = "TAKE A BREAK";
 
         private static NetSession session;
-        private static bool relabeled;
+        // The button we relabeled. The pause menu is made again for every scene, with a fresh "Exit Coop" button:
+        // a plain yes/no here left that new button alone from the second floor on.
+        private static dfButton relabeledButton;
+
+        private static bool Ours(dfButton b)
+        {
+            return b != null && relabeledButton != null && relabeledButton == b;
+        }
 
         public static void Init(NetSession netSession, Harmony harmony)
         {
@@ -30,12 +37,13 @@ namespace GungeonOnline
             dfButton b = menu != null ? menu.ExitToMainMenuButton : null;
             if (b == null)
                 return;
+            bool relabeled = Ours(b);
             bool isExitCoop = relabeled ? b.Text == Label : b.Text == ExitCoopKey;
             if (!isExitCoop)
                 return;
             if (Online && !relabeled)
             {
-                relabeled = true;
+                relabeledButton = b;
                 b.IsLocalized = false;
                 b.Text = Label;
                 b.Enable();
@@ -43,7 +51,7 @@ namespace GungeonOnline
             }
             else if (!Online && relabeled)
             {
-                relabeled = false;
+                relabeledButton = null;
                 b.Text = ExitCoopKey;
                 b.IsLocalized = true;
                 if (GameManager.Instance.CurrentGameType == GameManager.GameType.SINGLE_PLAYER)
@@ -63,7 +71,7 @@ namespace GungeonOnline
         [HarmonyPatch(typeof(PauseMenuController), "ToggleExitCoopButtonOnCoopChange")]
         private static void AfterCoopChange(PauseMenuController __instance)
         {
-            if (relabeled && Online && __instance.ExitToMainMenuButton != null)
+            if (Online && Ours(__instance.ExitToMainMenuButton))
                 __instance.ExitToMainMenuButton.Enable();
             Apply(__instance);
         }
@@ -73,7 +81,7 @@ namespace GungeonOnline
         private static void AfterVisibilityChanged(PauseMenuController __instance)
         {
             Apply(__instance);
-            if (relabeled && Online && __instance.ExitToMainMenuButton != null)
+            if (Online && Ours(__instance.ExitToMainMenuButton))
                 __instance.ExitToMainMenuButton.Enable();
         }
 
@@ -81,7 +89,7 @@ namespace GungeonOnline
         [HarmonyPatch(typeof(PauseMenuController), "DoExitToMainMenu")]
         private static bool BeforeExitClicked(PauseMenuController __instance)
         {
-            if (!relabeled || !Online || __instance.ExitToMainMenuButton == null || __instance.ExitToMainMenuButton.Text != Label)
+            if (!Ours(__instance.ExitToMainMenuButton) || !Online || __instance.ExitToMainMenuButton.Text != Label)
                 return true;
             Plugin.Log.LogInfo("Pause menu: Take a Break.");
             if (GameManager.HasInstance && GameManager.Instance.IsPaused)

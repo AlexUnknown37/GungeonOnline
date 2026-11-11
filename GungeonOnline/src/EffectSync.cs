@@ -39,7 +39,7 @@ namespace GungeonOnline
         [HarmonyPatch(typeof(GameActor), "ApplyEffect")]
         private static void BeforeApplyEffect(GameActor __instance, GameActorEffect __0, float __1)
         {
-            if (applyingRemote || !Connected || !EnemySync.LocalBulletHitting || __0 == null)
+            if (applyingRemote || !Connected || !(EnemySync.LocalBulletHitting || EnemySync.BeamHitting) || __0 == null)
                 return;
             AIActor enemy = __instance as AIActor;
             int id;
