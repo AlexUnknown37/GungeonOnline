@@ -38,7 +38,8 @@ namespace GungeonOnline
         private float nextBlankAt;
 
         // Path following.
-        private static readonly List<Vector2> waypoints = new List<Vector2>();
+        // Per bot: two bots (a stand-in and Take a Break) must not share one path.
+        private readonly List<Vector2> waypoints = new List<Vector2>();
         private IntVector2 pathGoal = new IntVector2(-1, -1);
         private float nextPathAt;
         // Fighting.
@@ -610,7 +611,9 @@ namespace GungeonOnline
             RoomHandler room = me.CurrentRoom;
             if (room != null && room.IsSealed)
                 return false;
-            if (lootTarget == null || !StillLoot(lootTarget, me) || now >= nextLootScanAt)
+            // Look again once a second, or at once when what we were heading for is gone. (With nothing to loot this
+            // searched the whole floor every frame.)
+            if (now >= nextLootScanAt || (lootTarget != null && !StillLoot(lootTarget, me)))
             {
                 Component before = lootTarget;
                 nextLootScanAt = now + 1f;

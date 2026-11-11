@@ -539,7 +539,8 @@ namespace GungeonOnline
         // Host: a guest's purse changed (picked up money, bought something, used a key): the shared purse changes too.
         public static void OnWallet(BinaryReader r)
         {
-            int dm = r.ReadInt32(), dk = r.ReadInt32();
+            // Keep a guest's numbers in a sane range (a huge one would wrap around).
+            int dm = Mathf.Clamp(r.ReadInt32(), -9999, 9999), dk = Mathf.Clamp(r.ReadInt32(), -99, 99);
             PlayerController me = Me;
             if (me == null || !session.Link.IsHost || !InRunNow())
                 return;

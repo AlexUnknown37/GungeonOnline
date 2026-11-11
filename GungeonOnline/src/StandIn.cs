@@ -27,9 +27,17 @@ namespace GungeonOnline
         // The stand-in has the player's real gear on (until then it only has the character's starting kit, which
         // must never be remembered as theirs - that lost players their guns).
         private static bool geared;
-        // Where the stand-in last was, per player name, to put the returning player there.
-        private static readonly System.Collections.Generic.Dictionary<string, Vector2> handedBack =
-            new System.Collections.Generic.Dictionary<string, Vector2>();
+        // Where the stand-in last was, per player, to put the returning player there. Only good on the same floor
+        // and for a short while: the spot means nothing a floor later.
+        private class HandBack
+        {
+            public Vector2 At;
+            public string Level;
+            public float When;
+        }
+        private const float HandBackSeconds = 120f;
+        private static readonly System.Collections.Generic.Dictionary<string, HandBack> handedBack =
+            new System.Collections.Generic.Dictionary<string, HandBack>();
 
         public static void Init(NetSession netSession, Harmony harmony)
         {
@@ -156,7 +164,11 @@ namespace GungeonOnline
             if (key == botKey)
             {
                 Plugin.Log.LogInfo(botName + " is back: their stand-in hands over.");
-                handedBack[key] = bot.transform.position;
+                HandBack h = new HandBack();
+                h.At = bot.transform.position;
+                h.Level = LevelSync.CurrentLevelKey();
+                h.When = Time.realtimeSinceStartup;
+                handedBack[key] = h;
                 Remove(true);
             }
             else if (slot == botSlot)
@@ -171,11 +183,13 @@ namespace GungeonOnline
         public static bool TakeHandBack(string key, out Vector2 at)
         {
             at = Vector2.zero;
-            Vector2 v;
-            if (!handedBack.TryGetValue(key, out v))
+            HandBack h;
+            if (!handedBack.TryGetValue(key, out h))
                 return false;
             handedBack.Remove(key);
-            at = v;
+            if (h.Level != LevelSync.CurrentLevelKey() || Time.realtimeSinceStartup - h.When > HandBackSeconds)
+                return false; // the host has moved on to another floor since, or it was long ago
+            at = h.At;
             return true;
         }
 
@@ -401,6 +415,13 @@ namespace GungeonOnline
 
         public static void Update()
         {
+            // The game destroyed the stand-in's character behind our back: clean up after it (its brain, two-player
+            // mode), or the next stand-in would get a second brain for the same character.
+            if ((object)bot != null && bot == null)
+            {
+                Remove(false);
+                return;
+            }
             if (bot == null)
                 return;
             ClearPitLevel(bot);
