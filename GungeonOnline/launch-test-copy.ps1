@@ -13,7 +13,8 @@
 param([string]$Name = "", [string]$Test = "", [switch]$AllocProf, [string]$Profile = "Bare", [string]$TestRun = "", [switch]$Bot, [int]$Lag = 0)
 $ErrorActionPreference = "Stop"
 
-$GameDir = "S:\_Games\Steamapps\steamapps\common\Enter the Gungeon"
+. "$PSScriptRoot\paths.ps1"
+$GameDir = Split-Path (Split-Path (Find-GameManaged))
 $Preloader = "$env:APPDATA\com.kesomannen.gale\enter-the-gungeon\profiles\$Profile\BepInEx\core\BepInEx.Preloader.dll"
 
 if (-not (Test-Path "$GameDir\steam_appid.txt")) {

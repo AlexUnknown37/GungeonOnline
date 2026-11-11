@@ -7,9 +7,8 @@
 param([switch]$Deploy)
 $ErrorActionPreference = "Stop"
 
-$GameManaged = "S:\_Games\Steamapps\steamapps\common\Enter the Gungeon\EtG_Data\Managed"
-$BepInExCore = "$PSScriptRoot\..\BepInEx\core"
-$Csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+. "$PSScriptRoot\paths.ps1"
+$refs = Get-References   # before the version bump: a missing game or BepInEx stops here with nothing changed
 $BinDir = "$PSScriptRoot\bin"
 $DistDir = "$PSScriptRoot\dist"
 $PackageDir = "$PSScriptRoot\package"
@@ -29,12 +28,6 @@ $version = "$($parts[0]).$([int]$parts[1] + 1).0"
 [IO.File]::WriteAllText($PluginPath, $oldPlugin.Replace("ModVersion = `"$previous`"", "ModVersion = `"$version`""))
 
 New-Item -ItemType Directory -Force $BinDir, $DistDir | Out-Null
-
-# The game runs an old Mono (.NET 3.5), so compile against the game's own mscorlib/System DLLs.
-$refs = @("mscorlib.dll", "System.dll", "System.Core.dll", "Assembly-CSharp.dll", "Assembly-CSharp-firstpass.dll", "PlayMaker.dll") |
-    ForEach-Object { "/reference:$GameManaged\$_" }
-$refs += Get-ChildItem "$GameManaged\UnityEngine*.dll" | Where-Object { $_.Name -notlike "*.mm.dll" } | ForEach-Object { "/reference:$($_.FullName)" }
-$refs += "/reference:$BepInExCore\BepInEx.dll", "/reference:$BepInExCore\0Harmony.dll"
 
 $sources = Get-ChildItem "$PSScriptRoot\src\*.cs" | ForEach-Object { $_.FullName }
 
