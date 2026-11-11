@@ -34,6 +34,8 @@ pass. Everything else is still *implemented and awaiting in-game verification*.
 | 2 (7 min) | + break fix, review corrections | **0 missed breaks.** Team wipe, host Quick Restart, guest followed onto the new run, floor matched again. 0 mod errors |
 | 3 (8 min) | + all second-pass changes | Invalid: my test helper had squeezed the windows to 464x261 and the death screen's Quick Restart threw at that size. Not the mod |
 | 4 (8 min) | same build, clean 960x540 windows | Fights, Bullet Bros boss room, team wipe, Quick Restart, guest "Restarting onto the host's new run", floor matched. **0 mod errors, 0 exceptions.** 1 missed break on each side |
+| 5 (12 min) | same build, Marine + Hunter | Bullet King room, wipe, restart, rejoin, the Hunter's dog shown on the other copy. 0 mod errors, 0 exceptions. 1 missed break on each side, again after the Quick Restart |
+| dice (8 min) | + attack dice (GO-37), diagnostic log | **All 91 dice keys the following copy used (8 bullet patterns, 83 gun shots) were identical to keys the leading copy used; it had none of its own.** 0 mod errors, 0 failed attack copies |
 
 Enemy drift on the following copy (the mod's own once-a-minute figure), at about 43 ms one-way delay:
 average 0.11 to 0.25 tiles before the following change, 0.14 to 0.39 after. That is **no measurable difference**
@@ -43,6 +45,10 @@ case the change targets on purpose. The change is justified by the game code, no
 What the sessions did **not** exercise: Steam, three or four players, a human player, beams, swords, the
 stand-in bot (no guest dropped), the exit elevator with a bot, a ghost host at an exit, the Master Round, a
 protected boss kill. Those fixes are implemented from the game code and still need a play-test.
+
+One thing the sessions keep showing and I could not explain: after a Quick Restart, one table-top object per
+session has a different colour in the two games at the same spot (the first floor of a session matched 560 of
+560). The floor fingerprint matches and the guest does build that floor from the host's progress.
 
 ### Assumptions from the first pass, now checked in the game code
 
@@ -88,6 +94,34 @@ All Implemented; the "Checked" column says how far.
 | GO-35 | Low | D-10. A guest's purse change during the host's loading screen was dropped. The obvious fix would have thrown: the key counter's setter needs the HUD, which doesn't exist during a load | kept and applied after the load | not exercised |
 | GO-36 | Low | D-11: the stand-in's shots got the host banned from shops (confirmed in game code); key items didn't reach the stand-in; the Take a Break button stopped working after the first floor (the pause menu is rebuilt per scene); a pet stayed "being petted" if the petter left | fixed each | patches load; not exercised |
 
+### Enemy attacks and bullets (last part of the second pass)
+
+This is the README's "enemy bullets with random spread or homing can still differ". Checked in the game code:
+
+- The seed sent with `AttackStart` wrapped exactly one call, the attack's `Update`. A scan of the decompile
+  (a regex heuristic, so approximate): of 95 attack classes, 8 roll dice inside `Update` and 23 only later; of
+  296 bullet scripts, 138 roll nothing, 47 only before their first wait, 111 after it or in child bullets.
+  Patterns run as scripts over seconds, one step per 1/60 s of game time.
+- A gun enemy fires a few frames after its attack starts, and **gun spread doesn't use the engine's dice at
+  all**: `ProjectileModule.GetAngleVariance` uses one static counter shared by every gun in the game.
+- Follower aim is at the smoothed, delayed body of a remote player, with no velocity, so "leading" shots don't
+  lead on observers' screens. Each game alone decides whether its own player is hit, so this is cosmetic.
+  Enemy homing rockets (`RobotechProjectile` and a few others) home on each game's own player, whoever the
+  enemy targeted: a real one-sided effect that needs a design decision.
+
+| ID | Sev | What | Fix | Checked |
+|---|---|---|---|---|
+| GO-37 | Medium | **Enemy attacks rolled different dice in every game** (above) | every step of a pattern started by a synced attack rolls from (attack seed, script, step number); a gun enemy's shot and a teleport's landing spot roll from the attack seed, with the spread counter set for that shot; the game's dice are restored after each | two-copy: 91 of 91 keys on the follower identical to the leader's. Whether the patterns then *look* the same still wants a side-by-side look at a boss |
+| GO-38 | Low | S-4: a copied attack was run on an enemy copy the game itself would not run yet (not started or awake, no shadow) and threw inside `TeleportBehavior.Update`, after the copy had been moved | not replayed on such a copy | two-copy: 2 failures in earlier sessions, 0 since |
+| GO-39 | Low-Med | Shot copies started at the muzzle one network delay late, so they flew behind and could visibly miss what the real bullet hit | a plain straight copy starts where the bullet is by now (at most 0.15 s / 3 tiles, never past a wall or an enemy) | ran clean; the visual effect not judged |
+| GO-40 | Low-Med | D-2: copies rolled the bullet's own poison / fire / freeze / charm chances on top of what the shooter's game reported | switched off on copies (not for exploding bullets, whose explosion kind comes from the same marks) | ran clean |
+| GO-41 | Low | A partner's blank was triggered with *our* player as its user, so the game applied our blank items to it (ammo back for us, our Ammolet's effects on the enemies) | no user | code path |
+
+Not done from this part: sending a teleport's destination (it differs when it depends on each game's camera),
+bullets some items and companions fire that bypass the shot hooks (the damage still arrives, the picture is
+missing: thrown guns, the Shadow Clone, bank-fired companion shots, beams from anything but the gun in hand),
+and batching several pellets into one packet (needs a version bump; about 75% less for a shotgun).
+
 No packet format changed in the second pass either. One message gained a trailing field (`AtExit` now carries where
 the exit leads); old hosts ignore it and a new host accepts its absence. `Protocol.Version` stays 49.
 
@@ -99,10 +133,10 @@ the exit leads); old hosts ignore it and a new host accepts its absence. `Protoc
 | D-4 | Receivers don't check that the sender leads the room. A check with door slack is designed | false rejects are possible right after a fight-pull warp; add it log-only first |
 | D-5 | Remembered gear keyed by a name the client sends | design choice |
 | D-2 rest | Bullet copies still roll their own status-effect dice; transmogrify is not synced | touches how items feel |
-| S-1 | **Enemy bullets and attacks were not re-reviewed.** The planned deep dive (dice seeding of bullet scripts, aim at delayed positions, fast-forwarding shot copies, per-pellet datagrams) was cut off by a usage limit and not resumed | the README's "enemy bullets with random spread can differ" lives here |
+| S-1 | *(done: see "Enemy attacks and bullets" above.)* What remains there: aimed patterns still aim at each game's own view of the target; enemy homing rockets home on each game's own player | cosmetic / design decision |
 | S-2 | Knockback is counted twice on followed enemies (the leader's reported velocity includes it, the follower adds its own) | fixing it changes how hits feel; wants eyes on it |
 | S-3 | The Dragun's near-death attack group is private to its behaviour and not synced after the first pattern; the Advanced Dragun path spawns a separate enemy from local state | boss-specific, needs the fight |
-| S-4 | Gunjurer / Hollowpoint teleport copies fail on the follower with a NullReference at the start of `TeleportBehavior.Update` (seen twice); the enemy then snaps to place (the 11 to 29 tile "worst drift" readings). The log now shows where | cosmetic; cause likely the copy's shadow not existing yet |
+| S-4 | *(fixed: GO-38.)* Large "worst drift" readings (10 to 20 tiles) still occur: a teleport's destination is picked per game. GO-37 seeds it, which only helps when both games have the same candidate cells | needs the destination sent (protocol change) |
 | S-5 | With a stand-in the host's game is in two-player mode: enemies there have co-op health and bullet speed, shop prices and drop chances differ slightly from the guests'. A flying host can't use a trapdoor exit while the bot lives. The stand-in's beams are not shown to guests. A mid-game save taken then is marked co-op | each small; the trapdoor one is the same fix as GO-30 on another method |
 | P-8 … P-11 | unchanged from the first pass | protocol bump / profiling first |
 
@@ -536,4 +570,6 @@ Blind spots:
 | `b005f2a` | stand-in shots and the shopkeeper (GO-36, first part) |
 | `d2977b6` | R-1 … R-6, GO-23, GO-24 |
 | `625756b` | GO-25 … GO-36 |
-| (this commit) | second-pass section of this file |
+| `b98eb5e` | second-pass section of this file |
+| `4dc124d` | GO-37 … GO-41 |
+| (this commit) | this file: enemy attacks and bullets |
