@@ -104,6 +104,22 @@ namespace GungeonOnline
             return true;
         }
 
+        private static readonly System.Reflection.FieldInfo shopRoomField = AccessTools.Field(typeof(BaseShopController), "m_room");
+
+        // The shopkeeper counts any living player who is firing in his room (BaseShopController.Update walks
+        // GameManager.AllPlayers). The host's stand-in is the game's "player two", so its shots counted too and got
+        // the host banned. With a stand-in in the game, only our own shooting counts.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(BaseShopController), "PlayerFired")]
+        private static bool BeforePlayerFired(BaseShopController __instance)
+        {
+            if (!Online || !StandIn.Active)
+                return true;
+            PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+            Dungeonator.RoomHandler room = shopRoomField != null ? shopRoomField.GetValue(__instance) as Dungeonator.RoomHandler : null;
+            return me != null && me.healthHaver != null && me.healthHaver.IsAlive && me.IsFiring && (room == null || me.CurrentRoom == room);
+        }
+
         // The partner's copied bullets are pictures: they don't count as us shooting in the shop.
         [HarmonyPrefix]
         [HarmonyPatch(typeof(BaseShopController), "OnProjectileCreated")]
