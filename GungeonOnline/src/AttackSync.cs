@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using Brave.BulletScript;
 using HarmonyLib;
 using UnityEngine;
 
@@ -70,6 +71,31 @@ namespace GungeonOnline
                 }
             }
             Plugin.Log.LogInfo("AttackSync: watching " + updates + " kinds of enemy attack.");
+
+            // The same dice for what an attack fires afterwards (see "Dice for bullet patterns" below).
+            PatchDice(harmony, AccessTools.Method(typeof(Bullet), "DoTick"), "BeforeBulletTick", "AfterBulletTick");
+            PatchDice(harmony, AccessTools.Method(typeof(Bullet), "Fire",
+                new Type[] { typeof(Offset), typeof(Direction), typeof(Speed), typeof(Bullet) }), "BeforeBulletFire", null);
+            PatchDice(harmony, AccessTools.Method(typeof(ShootGunBehavior), "Fire"), "BeforeLaterRoll", "AfterLaterRoll");
+            PatchDice(harmony, AccessTools.Method(typeof(TeleportBehavior), "DoTeleport"), "BeforeLaterRoll", "AfterLaterRoll");
+        }
+
+        private static void PatchDice(Harmony harmony, MethodInfo target, string prefix, string finalizer)
+        {
+            if (target == null)
+            {
+                Plugin.Log.LogWarning("AttackSync: " + prefix + " has nothing to hook; enemy patterns may differ between games.");
+                return;
+            }
+            try
+            {
+                harmony.Patch(target, prefix: new HarmonyMethod(typeof(AttackSync), prefix),
+                    finalizer: finalizer != null ? new HarmonyMethod(typeof(AttackSync), finalizer) : null);
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning("AttackSync: couldn't hook " + target.DeclaringType.Name + "." + target.Name + ": " + e.Message);
+            }
         }
 
         private static bool Connected
@@ -138,8 +164,12 @@ namespace GungeonOnline
             }
             // Roll the dice from a seed we can send along, so the copy rolls the same.
             seed = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
+            leaderDice = UnityEngine.Random.state; // back to the game's own dice after this Update
             UnityEngine.Random.InitState(seed);
             seeded = true;
+            updatingActor = a;
+            updatingRoots = 0;
+            updatingShots = 0;
             return true;
         }
 
@@ -151,6 +181,8 @@ namespace GungeonOnline
             if (depth > 0 || replaying || !seeded)
                 return;
             seeded = false;
+            updatingActor = null;
+            UnityEngine.Random.state = leaderDice;
             if (__result == BehaviorResult.Continue)
                 return;
             AIActor a = ActorOf(__instance);
@@ -160,6 +192,12 @@ namespace GungeonOnline
             int index = AttacksOf(a).IndexOf((AttackBehaviorBase)__instance);
             if (index < 0)
                 return;
+            // What this attack fires over the next seconds rolls from the same seed (see below).
+            Dice started = new Dice();
+            started.Seed = seed;
+            started.Roots = updatingRoots;
+            started.Shots = updatingShots;
+            diceOf[a] = started;
             Started++;
             Send(a, id, index, (byte)__result, seed);
         }
@@ -214,6 +252,16 @@ namespace GungeonOnline
             }
             AttackBehaviorBase attack = attacks[index];
 
+            // The game never runs behaviours on a copy that isn't started and awake (BehaviorSpeculator.Update): its
+            // attacks have no enemy yet and it has no shadow. Running one anyway threw inside the attack (seen with
+            // teleporting enemies) after the copy had already been moved.
+            if (!a.isActiveAndEnabled || !spec.isActiveAndEnabled || !a.HasBeenAwoken
+                || ActorOf(attack) == null || (a.HasShadow && a.ShadowObject == null))
+            {
+                Missed++;
+                return;
+            }
+
             // Same spot, same target as in the leader's game.
             EnemySync.PlaceAt(a, pos);
             TargetSync.Force(a, target);
@@ -227,14 +275,20 @@ namespace GungeonOnline
                 if (classActive != null && classActive.Contains(spec.AttackBehaviors))
                     endClassContinuous.Invoke(spec, new object[] { spec.AttackBehaviors });
 
+                Dice copied = new Dice();
+                copied.Seed = diceSeed;
+                diceOf[a] = copied;
                 UnityEngine.Random.State saved = UnityEngine.Random.state;
                 UnityEngine.Random.InitState(diceSeed);
                 BehaviorResult result;
                 replaying = true;
                 try { result = attack.Update(); }
-                finally { replaying = false; }
-                // Back to the game's own dice afterwards.
-                UnityEngine.Random.state = saved;
+                finally
+                {
+                    replaying = false;
+                    // Back to the game's own dice afterwards (also when the attack threw).
+                    UnityEngine.Random.state = saved;
+                }
 
                 if (result == BehaviorResult.RunContinuous)
                     activeField.SetValue(spec, attack);
@@ -263,9 +317,186 @@ namespace GungeonOnline
             return spec != null && activeField != null && activeField.GetValue(spec) is AttackBehaviorBase;
         }
 
+        // ---- Dice for bullet patterns ----
+        // The seed sent with an attack used to cover one call: the attack's Update. Almost nothing an enemy fires is
+        // rolled there. Bullet patterns run as scripts over the following seconds (one step per 1/60 s of game
+        // time), gun enemies fire a few frames later, and the spread of an enemy's gun doesn't use the engine's dice
+        // at all but one counter shared by every gun in the game. So "the same attack" still sprayed differently
+        // in every game. Now:
+        // - every step of a pattern started by a synced attack rolls from (the attack's seed, which script, which
+        //   step). Steps are game-time steps, so they line up between games at any frame rate, and a step that rolls
+        //   once more or less in one game cannot shift the steps after it;
+        // - a gun enemy's shot and a teleport's landing spot roll from the attack's seed too, and the spread counter
+        //   is set from it for that shot;
+        // - the game's own dice are put back after each, so loot and effects are untouched.
+        // Aimed patterns still aim at where each game sees the target; that part cannot match.
+        private class Dice
+        {
+            public int Seed, Roots, Shots;
+        }
+        private static readonly Dictionary<AIActor, Dice> diceOf = new Dictionary<AIActor, Dice>();
+        private static readonly Dictionary<Bullet, int> keyOf = new Dictionary<Bullet, int>();
+        private static readonly Dictionary<Bullet, int> firedBy = new Dictionary<Bullet, int>();
+        private static AIActor updatingActor;  // leader: the enemy whose attack Update runs with `seed` right now
+        private static int updatingRoots, updatingShots;
+        private static UnityEngine.Random.State leaderDice;
+        private static readonly FieldInfo spreadCounter = AccessTools.Field(typeof(ProjectileModule), "m_angleVarianceIterator");
+
+        public struct SavedDice
+        {
+            public bool On;
+            public UnityEngine.Random.State Saved;
+            public int Spread;
+        }
+
+        private static int Mix(int a, int b)
+        {
+            unchecked
+            {
+                uint h = ((uint)a * 0x9E3779B1u) ^ (uint)b;
+                h ^= h >> 15;
+                h *= 0x85EBCA77u;
+                h ^= h >> 13;
+                return (int)h;
+            }
+        }
+
+        // The seed of the attack this enemy is in, with a running number so a second script or shot in the same
+        // attack doesn't repeat the first.
+        private static bool NextSeed(AIActor a, bool shot, out int s)
+        {
+            s = 0;
+            if (a == null)
+                return false;
+            if (seeded && updatingActor == a)
+            {
+                s = Mix(seed, shot ? 0x5107 + updatingShots++ : updatingRoots++);
+                return true;
+            }
+            Dice d;
+            if (!diceOf.TryGetValue(a, out d))
+                return false;
+            s = Mix(d.Seed, shot ? 0x5107 + d.Shots++ : d.Roots++);
+            return true;
+        }
+
+        private static void BeforeBulletTick(Bullet __instance, out SavedDice __state)
+        {
+            __state = new SavedDice();
+            if (!Connected)
+                return;
+            int key;
+            if (!keyOf.TryGetValue(__instance, out key))
+            {
+                // A script's first step: give it its key. (Bullets a script fires get theirs in BeforeBulletFire.)
+                if (__instance.Tick != 0 || !(__instance is Script))
+                    return;
+                AIBulletBank bank = __instance.BulletManager as AIBulletBank;
+                AIActor a = bank != null ? bank.aiActor : null;
+                if (a == null && bank != null)
+                    a = bank.GetComponentInParent<AIActor>();
+                int s;
+                if (!NextSeed(a, false, out s))
+                    return;
+                key = Mix(s, Protocol.Hash(__instance.GetType().Name));
+                if (keyOf.Count > 2000)
+                    PruneKeys();
+                keyOf[__instance] = key;
+            }
+            __state.On = true;
+            __state.Saved = UnityEngine.Random.state;
+            UnityEngine.Random.InitState(Mix(key, __instance.Tick));
+        }
+
+        private static Exception AfterBulletTick(Bullet __instance, Exception __exception, SavedDice __state)
+        {
+            if (__state.On)
+            {
+                UnityEngine.Random.state = __state.Saved; // a step inside a step gets the outer one's dice back
+                if (__instance.Destroyed || __instance.IsEnded)
+                {
+                    keyOf.Remove(__instance);
+                    firedBy.Remove(__instance);
+                }
+            }
+            return __exception;
+        }
+
+        // Bullets with a script of their own get a key from the bullet that fires them.
+        private static void BeforeBulletFire(Bullet __instance, Bullet __3)
+        {
+            int key;
+            if (__3 == null || __3.GetType() == typeof(Bullet) || !keyOf.TryGetValue(__instance, out key))
+                return;
+            int n;
+            firedBy.TryGetValue(__instance, out n);
+            firedBy[__instance] = n + 1;
+            keyOf[__3] = Mix(key, n + 1);
+        }
+
+        private static void PruneKeys()
+        {
+            List<Bullet> gone = new List<Bullet>();
+            foreach (Bullet b in keyOf.Keys)
+            {
+                if (b.Destroyed || b.IsEnded)
+                    gone.Add(b);
+            }
+            foreach (Bullet b in gone)
+            {
+                keyOf.Remove(b);
+                firedBy.Remove(b);
+            }
+            if (keyOf.Count > 2000)
+            {
+                keyOf.Clear();
+                firedBy.Clear();
+            }
+        }
+
+        // A gun enemy's shot (ShootGunBehavior.Fire) and a teleport's landing spot (TeleportBehavior.DoTeleport) are
+        // rolled a few frames after the attack starts.
+        private static void BeforeLaterRoll(BehaviorBase __instance, out SavedDice __state)
+        {
+            __state = new SavedDice();
+            int s;
+            if (!Connected || !NextSeed(ActorOf(__instance), true, out s))
+                return;
+            __state.On = true;
+            __state.Saved = UnityEngine.Random.state;
+            UnityEngine.Random.InitState(s);
+            if (spreadCounter != null)
+            {
+                __state.Spread = (int)spreadCounter.GetValue(null);
+                spreadCounter.SetValue(null, s & 0xFFFF); // never negative: it picks from a table
+            }
+        }
+
+        private static Exception AfterLaterRoll(Exception __exception, SavedDice __state)
+        {
+            if (__state.On)
+            {
+                UnityEngine.Random.state = __state.Saved;
+                if (spreadCounter != null)
+                    spreadCounter.SetValue(null, __state.Spread);
+            }
+            return __exception;
+        }
+
         // Forget enemies that are gone.
         public static void Update()
         {
+            if (diceOf.Count > 200)
+            {
+                List<AIActor> goneDice = new List<AIActor>();
+                foreach (AIActor a in diceOf.Keys)
+                {
+                    if (a == null)
+                        goneDice.Add(a);
+                }
+                foreach (AIActor a in goneDice)
+                    diceOf.Remove(a);
+            }
             if (attacksOf.Count > 200)
             {
                 List<AIActor> gone = new List<AIActor>();

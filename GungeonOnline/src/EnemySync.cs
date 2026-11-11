@@ -510,7 +510,7 @@ namespace GungeonOnline
 
         // How long a message from that player took to get here: half the round trip to the host, or (a guest hearing
         // another guest, relayed by the host) the whole round trip - two legs. Unknown ping counts as none.
-        private static float OneWayDelay(int from)
+        internal static float OneWayDelay(int from)
         {
             float ms;
             if (session.Link.IsHost)

@@ -98,7 +98,9 @@ namespace GungeonOnline
             {
                 SilencerInstance silencer = new GameObject("silencer").AddComponent<SilencerInstance>();
                 silencer.TriggerSilencer(center, expandSpeed, maxRadius, vfx, distIntensity, distRadius, pushForce, pushRadius,
-                    knockbackForce, knockbackRadius, extraTime, me, breaksWalls, skipBreakables);
+                    knockbackForce, knockbackRadius, extraTime, null, breaksWalls, skipBreakables);
+                // "null": nobody here triggered it. With our own player as its user, the game applied OUR blank
+                // items to the partner's blank (ammo back for us, our Ammolet's fire or poison on the enemies).
             }
             finally
             {
