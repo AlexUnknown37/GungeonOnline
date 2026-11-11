@@ -1,11 +1,112 @@
 # Gungeon Online — engineering audit and fixes (2026-11-10)
 
 Reviewed commit: `bcb228428121e28721bce74d0b5f35fce03abcf7` (`main`, version 0.161.0, protocol 49).
-Work branch: `audit/fable-review` (local only; nothing pushed). Seven commits on top of the reviewed one.
+Work branch: `audit/fable-review` (local only; nothing pushed); the commit list is at the end of this file.
 
 This file is the audit ledger and the handoff report in one. Every claim below is labelled with how it was
-checked. **A successful build is not a multiplayer test**: apart from one transport bug proven in a test harness
-and a single-copy load test, the fixes here are *implemented and awaiting in-game verification*.
+checked. It has two parts: the first pass (10 November, read and fix, no multiplayer run) and a **second pass
+(11 November)** that used a decompile of the game and real two-copy LAN sessions. The second pass is the next
+section; where it changes something said later in this file, it says so.
+
+**A successful build is not a multiplayer test.** What the two-copy sessions exercised is listed in the second
+pass. Everything else is still *implemented and awaiting in-game verification*.
+
+---
+
+## Second pass (11 November): decompile, two-copy sessions, sync
+
+### What was different this time
+
+- **Game code with method bodies.** A full decompile of `Assembly-CSharp.dll` (ILSpy) was used to check every
+  point the first pass had marked as an assumption, and to design the sync changes. The signature dumps in the
+  author's decomp folder were useful as an index; they have no method bodies.
+- **Real sessions.** Two copies of the game on one PC, isolated BepInEx folders, the mod's own test flags
+  (`--gungeon-online-test host|join`, `--gungeon-online-test-run`, `--gungeon-online-bot`, `--gungeon-online-lag 35`),
+  both copies played by the mod's bot. Five sessions of 2 to 8 minutes. Save folder backed up first.
+- **An independent review of this branch's own diff**, which found four regressions (below).
+
+### What the sessions showed
+
+| Session | Build | Result |
+|---|---|---|
+| 1 (6 min) | first-pass branch | Connect, same floor (fingerprint match), six fights, Gatling Gull killed on both, 0 mod errors. **9 of 19 "partner broke X" messages found nothing.** One attack copy failed (Gunjurer teleport, NullReference) |
+| deco (2 min) | diagnostic copy | Both copies listed every breakable decoration at floor load: **560 of 560 identical** (name and position). So decoration is in sync at load; it drifts later |
+| 2 (7 min) | + break fix, review corrections | **0 missed breaks.** Team wipe, host Quick Restart, guest followed onto the new run, floor matched again. 0 mod errors |
+| 3 (8 min) | + all second-pass changes | Invalid: my test helper had squeezed the windows to 464x261 and the death screen's Quick Restart threw at that size. Not the mod |
+| 4 (8 min) | same build, clean 960x540 windows | Fights, Bullet Bros boss room, team wipe, Quick Restart, guest "Restarting onto the host's new run", floor matched. **0 mod errors, 0 exceptions.** 1 missed break on each side |
+
+Enemy drift on the following copy (the mod's own once-a-minute figure), at about 43 ms one-way delay:
+average 0.11 to 0.25 tiles before the following change, 0.14 to 0.39 after. That is **no measurable difference**
+in these runs: the content differs every run (random seed, different rooms), and the bots don't produce the
+case the change targets on purpose. The change is justified by the game code, not yet by a measurement.
+
+What the sessions did **not** exercise: Steam, three or four players, a human player, beams, swords, the
+stand-in bot (no guest dropped), the exit elevator with a bot, a ghost host at an exit, the Master Round, a
+protected boss kill. Those fixes are implemented from the game code and still need a play-test.
+
+### Assumptions from the first pass, now checked in the game code
+
+| Point | Result |
+|---|---|
+| GO-02: forcing `HandleDeath_CR` ends the run even with a living second local player | Confirmed: the coroutine has no co-op check |
+| "Duplicate Revive with 3+ players" | **Rejected.** `ResurrectFromChest` runs `CoopResurrectInternal(isChest: true)`, which clears `IsGhost` before its first yield; a second Revive is ignored |
+| GO-15: Turbo / Rainbow are saved | Confirmed: `[fsProperty]` fields of `GameStatsManager` |
+| GO-08: a real unseal clears `IsSealed` at once | Confirmed: `RoomHandler.UnsealRoom` sets `m_isSealed = false` on every path except the NPC "seal all" early return |
+| P-1: the game's breakables lists are complete | Confirmed: `MinorBreakable`/`MajorBreakable` add themselves in `Awake`, remove in `OnDestroy` |
+| D-11: the stand-in's shots anger the shopkeeper | Confirmed and fixed (GO-36). Side note: the mod's existing patch on `BaseShopController.OnProjectileCreated` does nothing for this; that method only names the shopkeeper's own bullets |
+| DuelSync: `LoadCharacterSelect` marks "loading" at once | Confirmed |
+
+### Corrections to the first pass's own changes (found by the independent diff review)
+
+| # | What was wrong | Fix |
+|---|---|---|
+| R-1 | P-5 removed the per-message target update from `TargetSync.Force`; `AttackSync` starts the copied attack right after, so it aimed at the old target | `Force` sets that one enemy's target at once (still no full walk) |
+| R-2 | GO-02's `onlineGhost` mark was cleared on every floor load, and was never set for a host with a stand-in and no guest: both could leave a real online ghost without its game over | not cleared on load; a stand-in counts |
+| R-3 | GO-10's `FollowMissedLoad` could follow a stale load after the host had quit to the Breach or started a new run | only followed if it is still where the host is; cleared on run end |
+| R-4 | The stand-in shop rule required a connected guest, which is exactly when a stand-in usually does not have one | condition removed |
+| R-5 | Joining the Steam lobby we are already in became a full leave | ignored |
+| R-6 | Hello-less slot marks survived the session; a destroyed stand-in stayed on guests' rosters | cleared; roster re-sent |
+
+### New findings and fixes
+
+All Implemented; the "Checked" column says how far.
+
+| ID | Sev | What | Fix | Checked |
+|---|---|---|---|---|
+| GO-23 | Medium | **Broken table-top objects were not found about half the time.** Books, bottles and plates are knocked about differently in each game, so "the green book at (x, y)" named a spot where the other game had something else | breakables are sent and matched by where they **started** (identical in every game) | two-copy: 9 of 19 missed before, 0 to 1 per session after |
+| GO-24 | Medium | **Followed enemies were let go for every attack**, including shooting while walking (the commonest one). Their own movement then ran against a slow pull toward the leader's position: sliding and rubber-banding in fights. Also: frozen or falling enemies were still driven; a slowed enemy was slowed twice; some bosses' own scripts overwrote the drive velocity depending on script order | keep driving unless an attack owns the whole enemy; hands off frozen / falling / gone enemies; velocity written right before `AIActor.Update`; stand when the leader's copy stands | two-copy: no errors; drift unchanged within noise (see above) |
+| GO-25 | Medium | **Beam damage was never shared (was D-1)**, and neither were sword swings, dodge rolls into enemies, Knife Shield, orbital shield, aura items, the Katana, Hero's Sword and companion melee. All of these damage enemies outside `Projectile.HandleDamage`, only in their owner's game | added up per enemy and sent 10 times a second, for enemies we don't lead (the leader's health reports already carry its own) | compiles, loads, no errors in sessions; not exercised (bots use guns) |
+| GO-26 | Low-Med | A burn or poison that only landed in one game killed the enemy there and the death was deliberately not reported (was part of D-2) | every death is reported; a duplicate report does nothing | code path |
+| GO-27 | Medium | **GO-07 completed.** A kill from another game now goes in as unstoppable boss damage; if the enemy is still alive after the 10 s retry, its protection (minimum health, armor, invulnerability) is removed and it is killed through the normal death path, the same recipe the game uses for pits and the boss kill camera. Scripted boss moments are waited out for up to 20 s | as described | not exercised: needs the Dragun / Kaliber test |
+| GO-28 | Low | Bullet Bros enraging, a Shelleton coming back and similar heals happen locally; the leader's older, lower health then undid them for a moment | no clamp for 1 s after our copy's health rose | Bullet Bros room ran without errors |
+| GO-29 | Low | D-3 step 1: a remembered dead enemy number killed whatever later got that number | remembered with its kind and matched on both | code path |
+| GO-30 | **High with a bot** | **The host could not leave the floor until the stand-in stood on the elevator too.** With a stand-in the game is in two-player mode, where the exit needs every living local player on it; the bot only follows loosely, cannot open doors alone, and (new) could not move at all once off the host's screen | while the host stands on the elevator the stand-in doesn't have to; the stand-in is exempt from the camera fence | patches load; not exercised |
+| GO-31 | **High, rare** | **Softlock: host a ghost, the living guest waiting at an exit.** The elevator only comes for a living player, so the ghost host cannot take it; the held guest's screen is already black and it cannot move. Reached on exits without a boss kill (trapdoors, pit levels) | the guest tells the host where its exit leads; a ghost host takes that exit for the team | not exercised |
+| GO-32 | Medium | **Master Round sharing never worked.** The patch flips the room's "a player got hit" mark around the boss's loot drop, where it only doubles credits; the Master Round is decided later, in `RoomHandler.HandleBossClearReward`. Also D-9: the stand-in never reported its hits, and split money summed to 5/6 with host + guest + bot | same switch on the right method; the stand-in's hits are sent in its player's name; the host's game drops the stand-in's share | not exercised |
+| GO-33 | Medium | D-7 and D-8. A host's new run arriving during our own load started a second load on top (the decompile shows both coroutines then share statics and the first throws). A guest held at an exit followed with a plain load and kept the old run's gear | the restart waits for our load to finish (90 s safety net); a held guest restarts too and its exit wait is cleared | wipe + restart + rejoin worked in sessions 2 and 4; the mid-load case not exercised |
+| GO-34 | Medium | D-6. A chest was used up for a player who cannot be revived: still in the dying animation (the game makes the ghost only when it ends), or on the death screen after a wipe | "revivable ghost" = on our floor, not marked wiped, not in a death animation; the receiver also refuses a revive once its game over has begun | not exercised |
+| GO-35 | Low | D-10. A guest's purse change during the host's loading screen was dropped. The obvious fix would have thrown: the key counter's setter needs the HUD, which doesn't exist during a load | kept and applied after the load | not exercised |
+| GO-36 | Low | D-11: the stand-in's shots got the host banned from shops (confirmed in game code); key items didn't reach the stand-in; the Take a Break button stopped working after the first floor (the pause menu is rebuilt per scene); a pet stayed "being petted" if the petter left | fixed each | patches load; not exercised |
+
+No packet format changed in the second pass either. One message gained a trailing field (`AtExit` now carries where
+the exit leads); old hosts ignore it and a new host accepts its absence. `Protocol.Version` stays 49.
+
+### Still open after the second pass
+
+| ID | What | Why it waits |
+|---|---|---|
+| D-3 step 2 | Enemy numbers still depend on each game's spawn order. A design exists: enemies made by `AIActor.Spawn` (summons, split blobs, spawn-on-death) get a number from room + parent + kind in a separate range, so a one-sided spawn shifts nothing | changes what a number means: needs a `Protocol.Version` bump and a test with summoners |
+| D-4 | Receivers don't check that the sender leads the room. A check with door slack is designed | false rejects are possible right after a fight-pull warp; add it log-only first |
+| D-5 | Remembered gear keyed by a name the client sends | design choice |
+| D-2 rest | Bullet copies still roll their own status-effect dice; transmogrify is not synced | touches how items feel |
+| S-1 | **Enemy bullets and attacks were not re-reviewed.** The planned deep dive (dice seeding of bullet scripts, aim at delayed positions, fast-forwarding shot copies, per-pellet datagrams) was cut off by a usage limit and not resumed | the README's "enemy bullets with random spread can differ" lives here |
+| S-2 | Knockback is counted twice on followed enemies (the leader's reported velocity includes it, the follower adds its own) | fixing it changes how hits feel; wants eyes on it |
+| S-3 | The Dragun's near-death attack group is private to its behaviour and not synced after the first pattern; the Advanced Dragun path spawns a separate enemy from local state | boss-specific, needs the fight |
+| S-4 | Gunjurer / Hollowpoint teleport copies fail on the follower with a NullReference at the start of `TeleportBehavior.Update` (seen twice); the enemy then snaps to place (the 11 to 29 tile "worst drift" readings). The log now shows where | cosmetic; cause likely the copy's shadow not existing yet |
+| S-5 | With a stand-in the host's game is in two-player mode: enemies there have co-op health and bullet speed, shop prices and drop chances differ slightly from the guests'. A flying host can't use a trapdoor exit while the bot lives. The stand-in's beams are not shown to guests. A mid-game save taken then is marked co-op | each small; the trapdoor one is the same fix as GO-30 on another method |
+| P-8 … P-11 | unchanged from the first pass | protocol bump / profiling first |
+
+---
 
 ## Summary
 
@@ -58,7 +159,7 @@ No vendor or generated code is committed (`.gitignore` keeps reference copies ou
 | Same tests on the branch | 4 of 4 pass |
 | Load test: one copy of the real game, isolated BepInEx folder, audited DLL, to the title screen and Breach setup | plugin loads, every Harmony patch applies, both self-tests log OK, no Gungeon Online error. Two HarmonyX warnings (`RobotPastController.Update`, `ExpandTheGungeon…` type lookup) are present on the original code path too and are handled by the mod |
 
-### What was not run
+### What was not run (first pass; see the second pass above for the sessions run since)
 
 - No two-copy session, no Steam session, no run was started. Nothing in sections B–D is verified in play
   unless it says so.
@@ -254,6 +355,9 @@ Line numbers refer to the reviewed commit `bcb2284`.
 
 ### Deferred (real, not changed here)
 
+*Second pass: D-1, D-6, D-7, D-8, D-9, D-10 and D-11 are now fixed, and D-2 and D-3 partly; see the table of
+new fixes above. The rows are kept as the record of what was found.*
+
 | ID | Sev / Conf | What | Why deferred |
 |---|---|---|---|
 | D-1 | Medium / Verified (decompile) | Beam damage is never shared: `BasicBeamController.FrameUpdate` calls `ApplyDamage` outside `Projectile.HandleDamage`, so `LocalBulletHitting` is false. A non-leader's beam only shows up as a sudden death | new feature (needs batching per enemy at 10–15 Hz), wants play-testing |
@@ -274,9 +378,9 @@ Line numbers refer to the reviewed commit `bcb2284`.
 
 ### Needs investigation (not findings)
 
-- Duplicate `Revive` with 3+ players after a boss: every living player sends one. Depends on when the game clears `IsGhost`.
-- Host is a ghost, a living guest is held at the exit: can the ghost host trigger the exit at all? Possible softlock.
-- `MenuGuard.BeforeUnpause` blocks every `Unpause` while the Multiplayer menu is open, including the game's own.
+- Duplicate `Revive` with 3+ players after a boss: **rejected in the second pass** (game code).
+- Host is a ghost, a living guest is held at the exit: **confirmed as a softlock and fixed in the second pass (GO-31).**
+- `MenuGuard.BeforeUnpause`: **not a softlock** (second pass): only player-driven callers use `Unpause`; loads use `ForceUnpause`.
 - `SaveSync.OnProgress` deserializes host-sent JSON with no size cap (host is trusted; still worth a cap).
 
 ### Rejected after checking (selection)
@@ -373,10 +477,12 @@ on the host (P-1); ghost host cannot kill with the ghost pulse when **no** stand
 
 Fix before wider testing:
 
-1. Play through T1–T7 (an evening with two copies and `launch-test-copy.ps1`). Estimate: 2–3 h.
-2. D-7 (second load while loading) and D-6 (chest used up for a death-screen player). Each about an hour plus testing;
-   D-6 needs a protocol bump.
-3. D-1 beam damage. Half a day including batching and a boss test.
+1. Play through T1–T7 (an evening with two copies and `launch-test-copy.ps1`). Estimate: 2–3 h. *Second pass:
+   T2-like flows (join, floor match, wipe, restart, rejoin) ran clean with bots; the rest still needs people.*
+2. *(done in the second pass: D-7, D-6 without a protocol bump, D-1.)* Play-test them instead: a beam or sword as
+   the non-leading player; a chest opened while the partner is still dying; a host restart during a guest's load.
+3. With a third copy or a dropped guest: the stand-in on the exit elevator (GO-30), a ghost host with the guest
+   at a trapdoor (GO-31), the Master Round with one player hit (GO-32), the Dragun killed by the guest (GO-27).
 
 Fix next for reliability and smoothness:
 
@@ -426,4 +532,8 @@ Blind spots:
 | `6705825` | GO-04, GO-05, GO-12, P-2, P-6, caps in GO-21, quit ordering |
 | `db9dae9` | GO-02, GO-03, GO-09, GO-10, GO-11, GO-15, D-6 partial |
 | `f7b9489` | GO-06, GO-07, GO-08, GO-18, GO-19, GO-21, GO-22, P-3, P-4, P-5 |
-| (this commit) | `tests/`, README build notes, this file |
+| `92b5876` | `tests/`, README build notes, this file |
+| `b005f2a` | stand-in shots and the shopkeeper (GO-36, first part) |
+| `d2977b6` | R-1 … R-6, GO-23, GO-24 |
+| `625756b` | GO-25 … GO-36 |
+| (this commit) | second-pass section of this file |
