@@ -165,12 +165,22 @@ namespace GungeonOnline
 
         // ---- The duel ----
 
+        private static CoopPastController arena;
+        private static float nextArenaLookAt;
+
         public static void Update()
         {
             GameManager gm = GameManager.HasInstance ? GameManager.Instance : null;
             if (gm == null)
                 return;
-            bool arenaLoaded = Object.FindObjectOfType<CoopPastController>() != null;
+            // Searching the scene every frame (offline too) is slow and the arena is almost never there: remember it
+            // once found, and otherwise look four times a second.
+            if (arena == null && Time.realtimeSinceStartup >= nextArenaLookAt)
+            {
+                nextArenaLookAt = Time.realtimeSinceStartup + 0.25f;
+                arena = Object.FindObjectOfType<CoopPastController>();
+            }
+            bool arenaLoaded = arena != null;
             if (gm.IsFoyer && !arenaLoaded && LevelSync.CurrentLevelKey().StartsWith("tt_foyer"))
             {
                 InPrivatePast = false;

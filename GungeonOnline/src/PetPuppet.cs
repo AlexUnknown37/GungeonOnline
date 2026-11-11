@@ -45,8 +45,22 @@ namespace GungeonOnline
             // Scene loads destroy the copy (sprite == null), so it gets rebuilt as needed.
             if (sprite == null || guid != builtGuid)
             {
-                if (!Build(guid))
+                // A companion we can't build (from a mod only they have) is not tried again every frame - that was
+                // 60 log lines a second - and no rebuild more than twice a second.
+                float now = Time.realtimeSinceStartup;
+                if ((guid == failedGuid && now < retryFailedAt) || now < nextBuildAt)
+                {
+                    Hide();
                     return;
+                }
+                nextBuildAt = now + 0.5f;
+                if (!Build(guid))
+                {
+                    failedGuid = guid;
+                    retryFailedAt = now + 30f;
+                    return;
+                }
+                failedGuid = null;
             }
 
             if (!sprite.gameObject.activeSelf)
@@ -59,6 +73,9 @@ namespace GungeonOnline
             sprite.transform.position += new Vector3(offset.x, offset.y, 0f);
             sprite.UpdateZDepth();
         }
+
+        private string failedGuid;
+        private float retryFailedAt, nextBuildAt;
 
         public void Hide()
         {

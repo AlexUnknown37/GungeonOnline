@@ -632,7 +632,7 @@ namespace GungeonOnline
                     RemotePlayerState p = session.Players[i];
                     bool here = connected && p.Connected && i != session.LocalSlot && !LoopSync.TubePlaying;
                     Puppets[i].Update(p, here);
-                    Pets[i].Update(p, here && Puppets[i].Status.StartsWith("shown"));
+                    Pets[i].Update(p, here && Puppets[i].IsShown);
                 }
                 AllocProfiler.End("puppets.Update", __m);
             }
@@ -670,9 +670,16 @@ namespace GungeonOnline
 
         private void OnApplicationQuit()
         {
-            SaveSync.EndBorrow("game closing"); // never quit with the host's progress in place
-            session.Leave();
-            session.Discovery.Stop();
+            try
+            {
+                SaveSync.EndBorrow("game closing"); // never quit with the host's progress in place
+            }
+            finally
+            {
+                // Whatever happened above, still say goodbye (the others would wait 20 s for a timeout) and close.
+                session.Leave();
+                session.Discovery.Stop();
+            }
         }
 
         // If the game was started by clicking "Join Game" on a Steam invite,

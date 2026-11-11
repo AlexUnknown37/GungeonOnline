@@ -142,6 +142,8 @@ namespace GungeonOnline
         {
             int level = r.ReadInt32();
             int count = r.ReadByte();
+            if (count > 32)
+                return; // more than any game sends: each new one would make another sprite object
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             bool here = me != null && level == LevelSync.CurrentLevelCode() && !GameManager.Instance.IsLoadingLevel;
             int from = Mathf.Clamp(session.From, 0, shownBy.Length - 1);

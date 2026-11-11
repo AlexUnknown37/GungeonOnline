@@ -272,6 +272,8 @@ namespace GungeonOnline
                 else
                     MultiplayerMenu.EnterBreachFromTitle(); // accepted an invite on the title screen
             };
+            // A friend's invite accepted while the game runs goes the same way as the menu's Join button.
+            lobby.OnJoinRequest = JoinSteamLobby;
             Steam = new SteamLink(lobby);
         }
 
@@ -283,8 +285,14 @@ namespace GungeonOnline
 
         public void JoinSteamLobby(CSteamID lobby)
         {
-            if (Steam != null)
-                Steam.Lobby.Join(lobby);
+            if (Steam == null)
+                return;
+            // End whatever session we're in first (hosting on Steam included). Joining used to leave only the Steam
+            // lobby: our slot stayed "host", so every packet from the new host looked like our own and was dropped,
+            // and the menu said "Connecting..." forever.
+            if (Link != null)
+                Leave();
+            Steam.Lobby.Join(lobby);
         }
 
         public bool HostLan(int port)
@@ -1271,6 +1279,17 @@ namespace GungeonOnline
         private void ReadPlayerState(BinaryReader r, RemotePlayerState Remote)
         {
             float sentAt = r.ReadSingle();
+            if (float.IsNaN(sentAt) || float.IsInfinity(sentAt))
+                return; // would poison the motion smoothing (and the puppet's position) for good
+            // The clock in this slot's updates jumped: someone else speaks for the slot now (the host's stand-in took
+            // over or handed back; each game has its own clock) or the sender restarted. Without starting over, every
+            // update with the lower clock looked "older than the newest" and was thrown away until the next floor.
+            if (Remote.SentAt >= 0f && Mathf.Abs(sentAt - Remote.SentAt) > 5f)
+            {
+                Remote.SentAt = -1f;
+                Remote.Motion.Clear();
+                Remote.PetMotion.Clear();
+            }
             byte flags = r.ReadByte();
             int sceneCode = r.ReadInt32();
             bool hasPlayer = (flags & 1) != 0, slow = (flags & 2) != 0, clips = (flags & 4) != 0, visible = (flags & 8) != 0;

@@ -55,29 +55,36 @@ namespace GungeonOnline
 
         public void Update(RemotePlayerState remote, bool connected)
         {
+            // Whole texts, not pieced together: this runs every frame for every slot, online or not.
             string hiddenReason = null;
             if (!connected)
-                hiddenReason = "not connected";
+                hiddenReason = "hidden: not connected";
             else if (!remote.HasPlayer)
-                hiddenReason = "partner has no character (menus or loading)";
+                hiddenReason = "hidden: partner has no character (menus or loading)";
             else if (!remote.Visible)
-                hiddenReason = "partner's character is invisible in their game";
+                hiddenReason = "hidden: partner's character is invisible in their game";
             else if (!GameManager.HasInstance || GameManager.Instance.PrimaryPlayer == null)
-                hiddenReason = "you have no character yet";
+                hiddenReason = "hidden: you have no character yet";
             else if (remote.Scene != LevelSync.CurrentLevelKey())
-                hiddenReason = "partner is on another floor (" + remote.Scene + ")";
+                hiddenReason = "hidden: partner is on another floor";
             if (hiddenReason != null)
             {
                 Hide();
-                Status = "hidden: " + hiddenReason;
+                Status = hiddenReason;
+                IsShown = false;
                 return;
             }
 
             // Scene loads destroy the puppet (go == null), so it gets rebuilt as needed.
             if (go == null || remote.Identity != builtIdentity || remote.AltCostume != builtAltCostume || remote.CustomCharacter != builtCustom)
             {
+                // After a failed build, try again twice a second, not every frame.
+                IsShown = false;
+                if (Time.realtimeSinceStartup < nextBuildAt)
+                    return;
                 if (!Build(remote))
                 {
+                    nextBuildAt = Time.realtimeSinceStartup + 0.5f;
                     Status = "couldn't load character";
                     return;
                 }
@@ -107,7 +114,12 @@ namespace GungeonOnline
             UpdateShadow(remote, feet, go.transform.position.z);
 
             Status = "shown"; // details only when asked (Details), not rebuilt every frame
+            IsShown = true;
         }
+
+        // The puppet was drawn in the last Update.
+        public bool IsShown { get; private set; }
+        private float nextBuildAt;
 
         public void Hide()
         {
@@ -119,6 +131,7 @@ namespace GungeonOnline
                 shadowGo.SetActive(false);
             flames.Clear();
             Status = "hidden";
+            IsShown = false;
         }
 
         // The blob shadow under the partner's feet: a stripped copy of our own player's shadow.

@@ -98,8 +98,14 @@ namespace GungeonOnline
         // A friend accepted our invite while the game was already running.
         private void OnJoinRequested(GameLobbyJoinRequested_t request)
         {
-            Join(request.m_steamIDLobby);
+            if (OnJoinRequest != null)
+                OnJoinRequest(request.m_steamIDLobby);
+            else
+                Join(request.m_steamIDLobby);
         }
+
+        // Set by the session so it can end the current session before the join.
+        public System.Action<CSteamID> OnJoinRequest;
 
         private void OnLobbyEnter(LobbyEnter_t entered)
         {

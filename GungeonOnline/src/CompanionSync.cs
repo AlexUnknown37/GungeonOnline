@@ -178,7 +178,7 @@ namespace GungeonOnline
             {
                 bool showPlayer = connected && session.LocalSlot != slot && scenes[slot] == level
                     && Time.realtimeSinceStartup - receivedAt[slot] < 1f && !LoopSync.TubePlaying
-                    && Plugin.Puppets[slot] != null && Plugin.Puppets[slot].Status.StartsWith("shown");
+                    && Plugin.Puppets[slot] != null && Plugin.Puppets[slot].IsShown;
                 for (int k = 0; k < MaxExtras; k++)
                 {
                     Entry e = entries[slot][k];

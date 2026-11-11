@@ -86,7 +86,11 @@ namespace GungeonOnline
                     FoundHost host = new FoundHost();
                     host.SameVersion = r.ReadInt32() == Protocol.Version;
                     host.Name = r.ReadString();
+                    if (host.Name.Length > 32)
+                        host.Name = host.Name.Substring(0, 32);
                     host.Address = new IPEndPoint(from.Address, r.ReadInt32());
+                    if (Found.Count >= 16)
+                        return; // anyone on the network can answer: keep the list a sane size
                     // The same host can answer twice (broadcast + loopback); keep one.
                     foreach (FoundHost existing in Found)
                     {
