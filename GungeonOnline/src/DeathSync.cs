@@ -187,7 +187,8 @@ namespace GungeonOnline
                 allDeadSince = -1f;
                 return;
             }
-            if (!Connected && !onlineGhost)
+            // (A stand-in only exists while hosting: a host who died next to its bot is our business too.)
+            if (!Connected && !onlineGhost && !StandIn.Active)
             {
                 allDeadSince = -1f;
                 return;
@@ -260,7 +261,7 @@ namespace GungeonOnline
         // A new life (new run or revived) can game-over again later.
         public static void ResetGameOver()
         {
-            onlineGhost = false;
+            // Not onlineGhost: a ghost stays a ghost across a floor load. Update clears it once we're alive again.
             gameOverStarted = false;
         }
 

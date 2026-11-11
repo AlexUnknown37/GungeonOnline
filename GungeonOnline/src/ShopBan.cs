@@ -113,7 +113,7 @@ namespace GungeonOnline
         [HarmonyPatch(typeof(BaseShopController), "PlayerFired")]
         private static bool BeforePlayerFired(BaseShopController __instance)
         {
-            if (!Online || !StandIn.Active)
+            if (!StandIn.Active) // not "Online": with the only guest gone we're hosting but not connected
                 return true;
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             Dungeonator.RoomHandler room = shopRoomField != null ? shopRoomField.GetValue(__instance) as Dungeonator.RoomHandler : null;

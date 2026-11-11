@@ -60,10 +60,29 @@ namespace GungeonOnline
                 return;
             forced[enemy] = new KeyValuePair<int, float>(slot, Time.realtimeSinceStartup);
             int want;
-            // Update applies it this same frame (it walks every chased enemy; doing that here too, once per enemy
-            // per message, was n x n work 15 times a second).
+            // This enemy only, and right now: AttackSync starts the copied attack straight after this call, and it
+            // must aim at the new target. (Walking every chased enemy here, once per enemy per message, was n x n
+            // work 15 times a second; Update still does the full walk once a frame.)
             if (Resolve(slot, out want))
+            {
                 chasing[enemy] = want;
+                ApplyOverride(enemy, want);
+            }
+        }
+
+        private static void ApplyOverride(AIActor enemy, int value)
+        {
+            SpeculativeRigidbody want = value == Bot ? (StandIn.Player != null ? StandIn.Player.specRigidbody : null)
+                : value != Me && active[value] ? targets[value] : null;
+            if (want != null)
+            {
+                if (enemy.OverrideTarget != want)
+                    enemy.OverrideTarget = want;
+            }
+            else if (IsOurBody(enemy.OverrideTarget))
+            {
+                enemy.OverrideTarget = null;
+            }
         }
 
         // A slot as a chase target in our game: us, the stand-in, or another player's invisible body.
@@ -246,17 +265,7 @@ namespace GungeonOnline
                     gone.Add(enemy);
                     continue;
                 }
-                SpeculativeRigidbody want = pair.Value == Bot ? (StandIn.Player != null ? StandIn.Player.specRigidbody : null)
-                    : pair.Value != Me && active[pair.Value] ? targets[pair.Value] : null;
-                if (want != null)
-                {
-                    if (enemy.OverrideTarget != want)
-                        enemy.OverrideTarget = want;
-                }
-                else if (IsOurBody(enemy.OverrideTarget))
-                {
-                    enemy.OverrideTarget = null;
-                }
+                ApplyOverride(enemy, pair.Value);
             }
             if (gone != null)
             {

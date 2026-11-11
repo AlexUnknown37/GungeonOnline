@@ -76,7 +76,7 @@ namespace GungeonOnline
         private static void AfterMinorBreak(MinorBreakable __instance, Vector2 direction, bool __state)
         {
             if (!__state && __instance.IsBroken)
-                SendBreak(Kind.Minor, __instance.gameObject, __instance.transform.position, direction);
+                SendBreak(Kind.Minor, __instance.gameObject, HomeOf(__instance, __instance.transform.position), direction);
         }
 
         [HarmonyPrefix]
@@ -91,7 +91,7 @@ namespace GungeonOnline
         private static void AfterMinorBreakNoDir(MinorBreakable __instance, bool __state)
         {
             if (!__state && __instance.IsBroken)
-                SendBreak(Kind.Minor, __instance.gameObject, __instance.transform.position, Vector2.zero);
+                SendBreak(Kind.Minor, __instance.gameObject, HomeOf(__instance, __instance.transform.position), Vector2.zero);
         }
 
         [HarmonyPrefix]
@@ -106,7 +106,7 @@ namespace GungeonOnline
         private static void AfterMajorBreak(MajorBreakable __instance, Vector2 sourceDirection, bool __state)
         {
             if (!__state && __instance.IsDestroyed && __instance.GetComponent<FlippableCover>() == null)
-                SendBreak(Kind.Major, __instance.gameObject, __instance.transform.position, sourceDirection);
+                SendBreak(Kind.Major, __instance.gameObject, HomeOf(__instance, __instance.transform.position), sourceDirection);
         }
 
         [HarmonyPostfix]
@@ -116,6 +116,50 @@ namespace GungeonOnline
             TableInfo info;
             if (tables.TryGetValue(__instance, out info))
                 SendBreak(Kind.Table, __instance.gameObject, info.Home, Vector2.zero);
+        }
+
+        // ---- Where each breakable started ----
+        // Books, bottles and plates get knocked about, differently in every game, so "the green book at (x, y)"
+        // often named a spot where another game has a different book by then (in a two-copy test about half of
+        // all broken table-top objects were not found). Every game builds the same floor, so where a thing STARTED
+        // is the same everywhere: breaks are sent and matched by that.
+        private static readonly Dictionary<Component, Vector2> homes = new Dictionary<Component, Vector2>();
+        private static Dungeonator.Dungeon homesFloor;
+        private static float nextHomeScan;
+
+        private static void TrackHomes()
+        {
+            Dungeonator.Dungeon d = GameManager.Instance.Dungeon;
+            float now = Time.realtimeSinceStartup;
+            if (d != homesFloor)
+            {
+                homes.Clear();
+                homesFloor = d;
+                nextHomeScan = 0f;
+            }
+            if (d == null || now < nextHomeScan)
+                return;
+            nextHomeScan = now + 2f; // things made later (frozen-enemy crystals...) get the place we first saw them
+            AddHomes(StaticReferenceManager.AllMinorBreakables);
+            AddHomes(StaticReferenceManager.AllMajorBreakables);
+        }
+
+        private static void AddHomes<T>(List<T> list) where T : Component
+        {
+            if (list == null)
+                return;
+            for (int i = 0; i < list.Count; i++)
+            {
+                T c = list[i];
+                if (c != null && !homes.ContainsKey(c))
+                    homes[c] = c.transform.position;
+            }
+        }
+
+        private static Vector2 HomeOf(Component c, Vector2 otherwise)
+        {
+            Vector2 home;
+            return c != null && homes.TryGetValue(c, out home) ? home : otherwise;
         }
 
         // What broke here lately (by anything, including copies of other players' bullets): when another player's
@@ -268,7 +312,7 @@ namespace GungeonOnline
         {
             if (c == null || !ok(c))
                 return;
-            float d = Vector2.Distance(c.transform.position, pos);
+            float d = Vector2.Distance(HomeOf(c, c.transform.position), pos);
             if (d >= bestDist || BaseName(c.gameObject) != name)
                 return;
             best = c;
@@ -484,6 +528,10 @@ namespace GungeonOnline
 
         public static void Update()
         {
+            // Starting places are noted whenever we're in a session at all (a host alone included: whoever joins
+            // later needs ours to be from before things were knocked about).
+            if (session != null && session.Link != null && GameManager.HasInstance && !GameManager.Instance.IsLoadingLevel)
+                TrackHomes();
             if (!Connected || !GameManager.HasInstance || GameManager.Instance.IsLoadingLevel)
                 return;
             float now = Time.realtimeSinceStartup;

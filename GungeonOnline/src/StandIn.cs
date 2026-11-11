@@ -420,6 +420,8 @@ namespace GungeonOnline
             if ((object)bot != null && bot == null)
             {
                 Remove(false);
+                if (session != null)
+                    session.SendRosterNow(); // Remove only does this for a bot that still exists
                 return;
             }
             if (bot == null)

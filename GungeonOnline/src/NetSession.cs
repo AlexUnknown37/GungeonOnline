@@ -290,6 +290,8 @@ namespace GungeonOnline
             // End whatever session we're in first (hosting on Steam included). Joining used to leave only the Steam
             // lobby: our slot stayed "host", so every packet from the new host looked like our own and was dropped,
             // and the menu said "Connecting..." forever.
+            if (Link == Steam && Steam.Lobby.InLobby && Steam.Lobby.LobbyId == lobby)
+                return; // already in that lobby
             if (Link != null)
                 Leave();
             Steam.Lobby.Join(lobby);
@@ -1416,6 +1418,7 @@ namespace GungeonOnline
             // Don't leave a shared seed behind, or every later solo run would get the same dungeon.
             LevelSync.ResetSeed();
             LevelSync.OnSessionEnded();
+            Array.Clear(strangerSince, 0, strangerSince.Length);
             foreach (RemotePlayerState p in Players)
                 p.Reset();
             RebuildRemotes();

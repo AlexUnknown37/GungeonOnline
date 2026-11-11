@@ -521,6 +521,7 @@ namespace GungeonOnline
         private static void RestartOntoHostRun()
         {
             GameManager gm = GameManager.Instance;
+            missedLoad = null;
             WaitingForHost = false;
             WaitingToJoin = false;
             pendingFoyerReturn = false;
@@ -624,6 +625,10 @@ namespace GungeonOnline
                 return;
             LevelInfo m = missedLoad;
             missedLoad = null;
+            // Only if that is still where the host is (it's the very same record): the host may have gone on again,
+            // back to the Breach, or started a new run since.
+            if (!ReferenceEquals(m, hostLevel))
+                return;
             bool sameAsOurs = ourLevel != null && ourLevel.Seed == m.Seed && ourLevel.Index == m.Index && ourLevel.Custom == m.Custom;
             if (sameAsOurs || Time.realtimeSinceStartup - missedLoadAt > 120f)
                 return;
@@ -847,6 +852,7 @@ namespace GungeonOnline
         {
             hostLevel = null;
             ourLevel = null;
+            missedLoad = null;
             if (!GameManager.HasInstance || GameManager.Instance.IsFoyer || OnDeathScreen || DuelSync.InPrivatePast)
                 return;
             Plugin.Log.LogInfo("Host returned to the Breach; following.");
@@ -858,6 +864,7 @@ namespace GungeonOnline
         {
             hostLevel = null;
             ourLevel = null;
+            missedLoad = null;
             if (!GameManager.HasInstance || GameManager.Instance.IsFoyer || DuelSync.InPrivatePast)
                 return;
             if (!WaitingForHost && (OnDeathScreen || DeathPageUp()))

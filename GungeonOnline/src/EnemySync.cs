@@ -69,6 +69,8 @@ namespace GungeonOnline
             killRetryUntil.Clear();
             corrections.Clear();
             driven.Clear();
+            driveVelocity.Clear();
+            hadOverride.Clear();
             clearedSent.Clear();
             clearedByOthers.Clear();
         }
@@ -402,12 +404,38 @@ namespace GungeonOnline
 
         private static void Release(AIActor a)
         {
+            driveVelocity.Remove(a);
+            bool had;
+            hadOverride.TryGetValue(a, out had);
+            hadOverride.Remove(a);
             if (!driven.Remove(a) || a == null)
                 return;
-            a.BehaviorOverridesVelocity = false;
-            a.BehaviorVelocity = Vector2.zero;
+            // Back to what the game had: a few enemies (the Kill Pillars) always move by this override.
+            a.BehaviorOverridesVelocity = had;
+            if (!had)
+                a.BehaviorVelocity = Vector2.zero;
             if (a.behaviorSpeculator != null)
                 a.behaviorSpeculator.PreventMovement = false;
+        }
+
+        // The velocity we drive each followed enemy with, written again right before the game reads it: some
+        // enemies' own scripts (the Treadnought, the Bashellisk) write zero every frame, and which write won
+        // depended on script order.
+        private static readonly Dictionary<AIActor, Vector2> driveVelocity = new Dictionary<AIActor, Vector2>();
+        private static readonly Dictionary<AIActor, bool> hadOverride = new Dictionary<AIActor, bool>();
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIActor), "Update")]
+        private static void BeforeActorUpdate(AIActor __instance)
+        {
+            if (driveVelocity.Count == 0)
+                return;
+            Vector2 v;
+            if (driveVelocity.TryGetValue(__instance, out v))
+            {
+                __instance.BehaviorOverridesVelocity = true;
+                __instance.BehaviorVelocity = v;
+            }
         }
         private static readonly Dictionary<AIActor, Correction> corrections = new Dictionary<AIActor, Correction>();
         private const float SnapDistance = 4f;      // further than this: jump
@@ -479,6 +507,8 @@ namespace GungeonOnline
                         Release(a);
                     driven.Clear();
                 }
+                driveVelocity.Clear();
+                hadOverride.Clear();
                 corrections.Clear();
                 return;
             }
@@ -680,22 +710,40 @@ namespace GungeonOnline
                     continue;
                 }
                 BehaviorSpeculator spec = a.behaviorSpeculator;
-                bool attacking = spec != null && spec.ActiveContinuousAttackBehavior != null;
-                if (spec != null && !attacking)
+                // The game itself is holding this enemy still or moving it (frozen solid, falling into a pit, gone
+                // mid-teleport, its AI switched off for a scripted moment): hands off, or an ice block slides.
+                if (a.IsFrozen || a.IsFalling || a.IsGone || (spec != null && !spec.enabled))
+                {
+                    Release(a);
+                    continue;
+                }
+                // Only an attack that owns the whole enemy (a charge, a leap) moves it instead of us. Shooting while
+                // walking does not: we used to let go for every attack, and then our copy walked its own way with a
+                // slow pull back toward the leader's - the sliding and rubber-banding during fights.
+                bool attackMovesIt = AttackSync.HasGlobalAttack(spec);
+                if (spec != null && !attackMovesIt)
                 {
                     // Walk it along the leader's path at the leader's pace (walking animations and walls included),
                     // instead of letting our copy wander its own way and pulling it back.
                     if (!driven.Contains(a))
                     {
                         driven.Add(a);
-                        spec.PreventMovement = true;
+                        hadOverride[a] = a.BehaviorOverridesVelocity;
                     }
+                    spec.PreventMovement = true; // every frame: some attacks switch it back off
                     Vector2 v = c.Velocity + delta * FollowGain;
                     float max = Mathf.Max(c.Velocity.magnitude, a.MovementSpeed) * 1.5f + 2f;
                     if (v.magnitude > max)
                         v = v.normalized * max;
+                    // The leader's copy stands and ours is close enough: stand too (no creeping, no turning about).
+                    if (c.Velocity.sqrMagnitude < 0.01f && dist < SettleDistance)
+                        v = Vector2.zero;
+                    // The game multiplies by our copy's own slow-down again; the leader's speed already includes it.
+                    else if (a.LocalTimeScale > 0.2f && a.LocalTimeScale < 1f)
+                        v /= a.LocalTimeScale;
+                    driveVelocity[a] = v;
                     a.BehaviorOverridesVelocity = true;
-                    a.BehaviorVelocity = dist < 0.05f && c.Velocity.sqrMagnitude < 0.01f ? Vector2.zero : v;
+                    a.BehaviorVelocity = v;
                     continue;
                 }
                 // Mid-attack (a charge, a leap...): the attack moves it; only gently pull a drift back.

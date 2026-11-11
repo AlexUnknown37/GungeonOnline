@@ -248,8 +248,19 @@ namespace GungeonOnline
             catch (Exception e)
             {
                 Missed++;
-                Plugin.Log.LogWarning("Couldn't copy " + a.name + "'s attack " + attack.GetType().Name + ": " + e.Message);
+                // With where it happened (the first lines of the trace): "object reference not set" alone says nothing.
+                string where = e.StackTrace ?? "";
+                if (where.Length > 400)
+                    where = where.Substring(0, 400);
+                Plugin.Log.LogWarning("Couldn't copy " + a.name + "'s attack " + attack.GetType().Name + ": " + e.Message + " " + where.Replace("\r", "").Replace("\n", " | "));
             }
+        }
+
+        // Is an attack that owns the whole enemy running (a charge, a leap, a teleport...)? Shooting while walking is
+        // not one: the game runs that kind next to the enemy's movement ("class specific").
+        public static bool HasGlobalAttack(BehaviorSpeculator spec)
+        {
+            return spec != null && activeField != null && activeField.GetValue(spec) is AttackBehaviorBase;
         }
 
         // Forget enemies that are gone.
