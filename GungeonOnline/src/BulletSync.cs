@@ -377,7 +377,10 @@ namespace GungeonOnline
         {
             bool remote = remoteProjectiles.Contains(__instance);
             EnemySync.RemoteBulletHitting = remote;
-            EnemySync.LocalBulletHitting = !remote;
+            // An enemy's own bullet that hits an enemy (a charmed one's) flies in every game: it is not "our hit" to
+            // report, or its damage lands once per player. (Companions' bullets are their player's.)
+            AIActor enemyOwner = __instance.Owner as AIActor;
+            EnemySync.LocalBulletHitting = !remote && (enemyOwner == null || enemyOwner.CompanionOwner != null);
         }
 
         // Safety net for any gun: without PvP, another player's copied bullet never hurts a player here, however it
@@ -602,8 +605,18 @@ namespace GungeonOnline
             if (p == null)
                 return;
 
+            // Copies are destroyed when they end (they're not pooled), so drop the ones that are gone now and then.
+            if (remoteProjectiles.Count > 256 && Time.realtimeSinceStartup >= nextCopyPruneAt)
+            {
+                nextCopyPruneAt = Time.realtimeSinceStartup + 2f;
+                remoteProjectiles.RemoveWhere(IsGone);
+                BulletMotion.Prune();
+            }
             remoteProjectiles.Add(p);
             theirs[TheirKey(netId)] = p;
+            // The shooter's game decides what a hit turns an enemy into; a copy rolling its own dice for it would
+            // change the enemy in this game only.
+            p.CanTransmogrify = false;
 
             // Pooled projectiles keep their last owner; make sure this one belongs to nobody here,
             // so it doesn't trigger our items or count as our kill.
@@ -690,6 +703,13 @@ namespace GungeonOnline
 
         // A bullet another player's copied item made here (a thrown item that flies like a bullet): treated like their
         // copied shots (it hurts no player without PvP; its damage to enemies comes from their game).
+        private static float nextCopyPruneAt;
+
+        private static bool IsGone(Projectile p)
+        {
+            return p == null;
+        }
+
         public static void TreatAsCopy(Projectile p)
         {
             if (p == null || session == null)

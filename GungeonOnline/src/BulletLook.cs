@@ -401,6 +401,8 @@ namespace GungeonOnline
         // Chain lightning pictures by name, from the items and guns that make them.
         private static Dictionary<string, GameObject> chainVfxByName;
 
+        private static float nextChainScanAt, nextCollectionScanAt;
+
         private static GameObject FindChainVfx(string name)
         {
             if (chainVfxByName == null)
@@ -420,8 +422,12 @@ namespace GungeonOnline
             GameObject found;
             if (!chainVfxByName.TryGetValue(name, out found))
             {
-                // Something new (another mod's item): look again next time.
-                chainVfxByName = null;
+                // Something new (another mod's item): look again, but not for every shot - at most every 10 seconds.
+                if (Time.realtimeSinceStartup >= nextChainScanAt)
+                {
+                    nextChainScanAt = Time.realtimeSinceStartup + 10f;
+                    chainVfxByName = null;
+                }
                 return null;
             }
             return found;
@@ -443,8 +449,15 @@ namespace GungeonOnline
         private static tk2dSpriteCollectionData FindCollection(string name)
         {
             tk2dSpriteCollectionData found;
-            if (collections.TryGetValue(name, out found) && found != null)
-                return found;
+            if (collections.TryGetValue(name, out found))
+            {
+                if (found != null)
+                    return found;
+                // Not found before: search again at most every 10 seconds, not for every shot that names it.
+                if (Time.realtimeSinceStartup < nextCollectionScanAt)
+                    return null;
+            }
+            nextCollectionScanAt = Time.realtimeSinceStartup + 10f;
             found = null;
             foreach (tk2dSpriteCollectionData c in Resources.FindObjectsOfTypeAll<tk2dSpriteCollectionData>())
             {

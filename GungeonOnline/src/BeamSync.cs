@@ -112,6 +112,8 @@ namespace GungeonOnline
         {
             int level = r.ReadInt32();
             int n = r.ReadByte();
+            if (n > 8)
+                return; // no game sends more than 8; each one is a beam object here
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             bool here = me != null && level == LevelSync.CurrentLevelCode() && !GameManager.Instance.IsLoadingLevel;
             float now = Time.realtimeSinceStartup;

@@ -60,11 +60,10 @@ namespace GungeonOnline
                 return;
             forced[enemy] = new KeyValuePair<int, float>(slot, Time.realtimeSinceStartup);
             int want;
+            // Update applies it this same frame (it walks every chased enemy; doing that here too, once per enemy
+            // per message, was n x n work 15 times a second).
             if (Resolve(slot, out want))
-            {
                 chasing[enemy] = want;
-                ReapplyOverrides();
-            }
         }
 
         // A slot as a chase target in our game: us, the stand-in, or another player's invisible body.

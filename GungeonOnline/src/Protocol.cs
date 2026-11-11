@@ -107,6 +107,18 @@ namespace GungeonOnline
             return new Vector2(DQ(r.ReadInt16()), DQ(r.ReadInt16()));
         }
 
+        // Numbers from another game that end up in positions, speeds or health must be real numbers: one NaN there
+        // spreads (a NaN health can never reach zero, a NaN position breaks the object for good).
+        public static bool Finite(float v)
+        {
+            return !float.IsNaN(v) && !float.IsInfinity(v);
+        }
+
+        public static bool Finite(Vector2 v)
+        {
+            return Finite(v.x) && Finite(v.y);
+        }
+
         // A short code for a text that's the same in every game (string.GetHashCode isn't promised to be).
         public static int Hash(string text)
         {

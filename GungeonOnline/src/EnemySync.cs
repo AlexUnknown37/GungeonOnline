@@ -66,6 +66,7 @@ namespace GungeonOnline
             deadIds.Clear();
             killQueue.Clear();
             queuedAt.Clear();
+            killRetryUntil.Clear();
             corrections.Clear();
             driven.Clear();
             clearedSent.Clear();
@@ -174,12 +175,22 @@ namespace GungeonOnline
                     return false; // the partner's game deals this damage and tells us
                 // While we're a ghost, only the living partner's game decides what enemies take damage or die
                 // (a ghost's pulse may knock enemies around, but must never kill them).
-                if (LocalIsGhost)
+                // (Unless the host's stand-in is alive: its hits happen in this game and nowhere else.)
+                if (LocalIsGhost && !StandInAlive)
                     return false;
             }
             if (!__instance.IsDead)
                 __state = __instance.GetCurrentHealth();
             return true;
+        }
+
+        private static bool StandInAlive
+        {
+            get
+            {
+                PlayerController bot = StandIn.Active ? StandIn.Player : null;
+                return bot != null && !bot.IsGhost && bot.healthHaver != null && !bot.healthHaver.IsDead;
+            }
         }
 
         private static bool LocalIsGhost
@@ -230,7 +241,7 @@ namespace GungeonOnline
             int id = r.ReadInt32();
             string guid = r.ReadString();
             float amount = r.ReadSingle();
-            if (level != LevelSync.CurrentLevelCode())
+            if (level != LevelSync.CurrentLevelCode() || !Protocol.Finite(amount) || amount <= 0f)
                 return;
             CheckFloor();
             AIActor a = Find(id, guid);
@@ -286,8 +297,38 @@ namespace GungeonOnline
             remotelyKilled.Add(a);
             ApplyRemoteDamage(a, KillHealth);
             if (a == null || a.healthHaver == null || !a.healthHaver.IsDead)
+            {
                 remotelyKilled.Remove(a);
+                // The game refused the killing blow (the enemy can't be hurt right now: a boss between phases, an
+                // armored or counted-hits enemy, its very first frame). It is dead in the other game, so keep at it
+                // for a while instead of leaving it alive here for good.
+                if (a != null && a.healthHaver != null)
+                {
+                    float now = Time.realtimeSinceStartup, until;
+                    if (!killRetryUntil.TryGetValue(a, out until))
+                    {
+                        until = now + KillRetrySeconds;
+                        killRetryUntil[a] = until;
+                    }
+                    if (until > 0f && now < until)
+                    {
+                        if (!killQueue.Contains(a))
+                        {
+                            killQueue.Add(a);
+                            queuedAt[a] = now - 1.4f; // again in a tenth of a second
+                        }
+                    }
+                    else if (until > 0f)
+                    {
+                        killRetryUntil[a] = -1f; // gave up: said once, not again
+                        Plugin.Log.LogWarning("Couldn't kill " + a.name + " here although it died in another game (it can't take damage).");
+                    }
+                }
+            }
         }
+
+        private const float KillRetrySeconds = 10f;
+        private static readonly Dictionary<AIActor, float> killRetryUntil = new Dictionary<AIActor, float>();
 
         private static void ApplyRemoteDamage(AIActor a, float amount)
         {
@@ -428,7 +469,20 @@ namespace GungeonOnline
 
         public static void Update()
         {
-            if (!Connected || !GameManager.HasInstance)
+            if (!Connected)
+            {
+                // Nobody leads these enemies any more: give them back their own movement. (They stayed switched off
+                // and slid along at their last reported speed for the rest of the floor.)
+                if (driven.Count > 0)
+                {
+                    foreach (AIActor a in new List<AIActor>(driven))
+                        Release(a);
+                    driven.Clear();
+                }
+                corrections.Clear();
+                return;
+            }
+            if (!GameManager.HasInstance)
                 return;
             CheckFloor();
             float now = Time.realtimeSinceStartup;
@@ -477,11 +531,21 @@ namespace GungeonOnline
             if (ids.Count == 0)
                 return;
             int level = LevelSync.CurrentLevelCode();
+            // 29 bytes an enemy: at most 40 per message keeps each under Steam's 1200-byte limit for messages sent
+            // without delivery guarantee (a bigger one isn't sent at all: a very crowded room got no updates).
+            for (int first = 0; first < ids.Count; first += MaxStatesPerMessage)
+                SendStates(level, ids, actors, first, Mathf.Min(ids.Count, first + MaxStatesPerMessage));
+        }
+
+        private const int MaxStatesPerMessage = 40;
+
+        private static void SendStates(int level, List<int> ids, List<AIActor> actors, int first, int end)
+        {
             session.SendUnreliable(MsgType.EnemyStates, delegate (BinaryWriter w)
             {
                 w.Write(level);
-                w.Write((ushort)ids.Count);
-                for (int i = 0; i < ids.Count; i++)
+                w.Write((ushort)(end - first));
+                for (int i = first; i < end; i++)
                 {
                     Vector2 p = actors[i].specRigidbody != null ? actors[i].specRigidbody.UnitCenter : (Vector2)actors[i].transform.position;
                     w.Write(ids[i]);
@@ -538,6 +602,8 @@ namespace GungeonOnline
                 int theirTarget = r.ReadByte();
                 Vector2 theirVelocity = new Vector2(r.ReadSingle(), r.ReadSingle());
                 int theirKind = r.ReadInt32();
+                if (!Protocol.Finite(theirPos) || !Protocol.Finite(theirVelocity) || !Protocol.Finite(theirHealth) || theirHealth < 0f)
+                    continue;
 
                 AIActor a;
                 if (!byId.TryGetValue(id, out a) || a == null || a.healthHaver == null || a.healthHaver.IsDead)
@@ -668,7 +734,10 @@ namespace GungeonOnline
             if (now - sealedEmptySince > 2f)
             {
                 Plugin.Log.LogInfo("Room is sealed with no enemies left (partner cleared it); unsealing.");
-                room.UnsealRoom();
+                // Our own guess, not a clear: don't tell the others (they would remove every later wave there).
+                applyingRemoteRoom = true;
+                try { room.UnsealRoom(); }
+                finally { applyingRemoteRoom = false; }
                 sealedEmptySince = -1f;
             }
         }
@@ -767,6 +836,9 @@ namespace GungeonOnline
             if (applyingRemoteRoom || !Connected || LocalIsGhost || !GameManager.HasInstance || GameManager.Instance.Dungeon == null)
                 return;
             if (__instance.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear))
+                return;
+            // The game can refuse to open a room (one an NPC or shrine keeps sealed): then nothing was cleared.
+            if (__instance.IsSealed)
                 return;
             CheckFloor();
             int roomIndex = GameManager.Instance.Dungeon.data.rooms.IndexOf(__instance);
