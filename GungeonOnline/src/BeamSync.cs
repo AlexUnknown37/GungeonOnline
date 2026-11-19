@@ -27,6 +27,20 @@ namespace GungeonOnline
         // Each other player's beams, by slot.
         private static readonly List<Shown>[] shownBy = NewLists();
 
+        // Is this one of the copies we draw for another player's beam (it deals no damage here)?
+        public static bool IsCopy(BeamController b)
+        {
+            foreach (List<Shown> list in shownBy)
+            {
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (list[i].Beam == b)
+                        return true;
+                }
+            }
+            return false;
+        }
+
         private static List<Shown>[] NewLists()
         {
             List<Shown>[] lists = new List<Shown>[Protocol.MaxPlayers];
@@ -112,6 +126,8 @@ namespace GungeonOnline
         {
             int level = r.ReadInt32();
             int n = r.ReadByte();
+            if (n > 8)
+                return; // no game sends more than 8; each one is a beam object here
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             bool here = me != null && level == LevelSync.CurrentLevelCode() && !GameManager.Instance.IsLoadingLevel;
             float now = Time.realtimeSinceStartup;

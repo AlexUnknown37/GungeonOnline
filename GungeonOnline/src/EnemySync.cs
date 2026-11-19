@@ -9,6 +9,7 @@ namespace GungeonOnline
     // Enemy sync: shared health, deaths and positions.
     // Every game runs its own copy of every enemy (same seed = same rooms and enemies). Each enemy gets
     // the same ID in both games: its room's index in the dungeon plus the order it joined that room.
+    // (Enemies made during play are numbered by who made them instead: see "Numbers for enemies made during play".)
     // - Damage dealt to an enemy in one game is sent to the other, so health matches (bosses too).
     // - An enemy that dies in one game dies in the other; enemies already killed by the partner die as
     //   soon as they appear when you enter that room later.
@@ -27,7 +28,10 @@ namespace GungeonOnline
         private static readonly Dictionary<AIActor, int> idOf = new Dictionary<AIActor, int>();
         private static readonly Dictionary<int, AIActor> byId = new Dictionary<int, AIActor>();
         private static readonly Dictionary<RoomHandler, int> roomCounters = new Dictionary<RoomHandler, int>();
-        private static readonly HashSet<int> deadIds = new HashSet<int>();
+        // Enemies known dead on this floor: number -> which kind of enemy it was. The kind matters: numbers come from
+        // the order each game made its enemies in, so after a spawn that only one game had, a number can belong to
+        // a different enemy here - and "dead number 12003" must not kill whatever else got that number.
+        private static readonly Dictionary<int, int> deadIds = new Dictionary<int, int>();
         private static readonly List<AIActor> killQueue = new List<AIActor>();
         private static readonly Dictionary<AIActor, float> queuedAt = new Dictionary<AIActor, float>();
         private static float nextStateAt;
@@ -63,11 +67,24 @@ namespace GungeonOnline
             idOf.Clear();
             byId.Clear();
             roomCounters.Clear();
+            spawnOrdinals.Clear();
+            spawnParents.Clear();
+            spawnDepth = 0;
+            pendingTransmogs.Clear();
             deadIds.Clear();
             killQueue.Clear();
             queuedAt.Clear();
+            killRetryUntil.Clear();
             corrections.Clear();
             driven.Clear();
+            driveVelocity.Clear();
+            hadOverride.Clear();
+            pendingDamage.Clear();
+            pendingGuid.Clear();
+            System.Array.Clear(lastRoomOf, 0, lastRoomOf.Length);
+            System.Array.Clear(prevRoomOf, 0, prevRoomOf.Length);
+            lastSeenHealth.Clear();
+            noClampUntil.Clear();
             clearedSent.Clear();
             clearedByOthers.Clear();
         }
@@ -86,16 +103,245 @@ namespace GungeonOnline
             int roomIndex = GameManager.Instance.Dungeon.data.rooms.IndexOf(__instance);
             if (roomIndex < 0)
                 return;
-            int counter;
-            roomCounters.TryGetValue(__instance, out counter);
-            roomCounters[__instance] = counter + 1;
-            int id = roomIndex * 1000 + counter;
+            int id;
+            if (spawnDepth > 0)
+            {
+                id = SpawnedId(roomIndex, enemy);
+            }
+            else
+            {
+                int counter;
+                roomCounters.TryGetValue(__instance, out counter);
+                roomCounters[__instance] = counter + 1;
+                id = roomIndex * 1000 + counter;
+            }
             idOf[enemy] = id;
             byId[id] = enemy;
-            if (deadIds.Contains(id))
+            int deadKind;
+            if (deadIds.TryGetValue(id, out deadKind) && deadKind == KindHash(enemy.EnemyGuid))
             {
                 killQueue.Add(enemy); // the partner already killed this one
                 queuedAt[enemy] = Time.realtimeSinceStartup;
+            }
+        }
+
+        // ---- Numbers for enemies made during play ----
+        // An enemy placed with its room gets room x 1000 + its place in the room's own order, the same in every
+        // game. Enemies made later by AIActor.Spawn (a summon, a blob's halves, what comes out of a dying enemy, a
+        // transmogrified chicken) used to take the next number in that order too - so one spawn that happened in
+        // one game only, or two parents dying in another order, gave every later enemy of the room a different
+        // number in each game. They now get a number worked out from what they are: the room, the enemy that made
+        // them, their kind, and which one of that kind from that parent. Such numbers are negative, so they can
+        // never meet a placed enemy's, and a spawn that only one game had moves nobody else's number.
+        private static int spawnDepth;
+        private static readonly List<AIActor> spawnParents = new List<AIActor>();
+        private static readonly Dictionary<int, int> spawnOrdinals = new Dictionary<int, int>();
+
+        // The enemy that is making other enemies right now (a summoner's attack, a dying blob...). Without one, a
+        // spawned enemy is numbered by room and kind alone.
+        public static void PushSpawnParent(AIActor parent)
+        {
+            spawnParents.Add(parent);
+        }
+
+        public static void PopSpawnParent()
+        {
+            if (spawnParents.Count > 0)
+                spawnParents.RemoveAt(spawnParents.Count - 1);
+        }
+
+        private static int Mix(int a, int b)
+        {
+            unchecked
+            {
+                uint h = ((uint)a * 0x9E3779B1u) ^ (uint)b;
+                h ^= h >> 15;
+                h *= 0x85EBCA77u;
+                h ^= h >> 13;
+                return (int)h;
+            }
+        }
+
+        private static int SpawnedId(int roomIndex, AIActor enemy)
+        {
+            int parentId = 0;
+            AIActor parent = spawnParents.Count > 0 ? spawnParents[spawnParents.Count - 1] : null;
+            if (parent != null && parent != enemy)
+                idOf.TryGetValue(parent, out parentId);
+            int key = Mix(Mix(roomIndex + 1, parentId), KindHash(enemy.EnemyGuid));
+            int ordinal;
+            spawnOrdinals.TryGetValue(key, out ordinal);
+            spawnOrdinals[key] = ordinal + 1;
+            int id = int.MinValue | (Mix(key, ordinal) & 0x7FFFFFFF);
+            // Two different enemies landing on one number is about a one in a billion chance per pair; step on then.
+            AIActor other;
+            for (int tries = 0; tries < 8 && byId.TryGetValue(id, out other) && other != null && other != enemy
+                && other.healthHaver != null && !other.healthHaver.IsDead; tries++)
+                id = int.MinValue | ((id + 1) & 0x7FFFFFFF);
+            // One line per enemy made during play: the two games' logs can be laid side by side.
+            Plugin.Log.LogInfo("Enemy made in play: " + enemy.name + " in room " + roomIndex + " is number " + id
+                + " (made by " + (parentId != 0 ? parentId.ToString() : "nobody") + ", its " + (ordinal + 1) + ". of that kind).");
+            return id;
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIActor), "Spawn", new System.Type[] { typeof(AIActor), typeof(IntVector2), typeof(RoomHandler), typeof(bool), typeof(AIActor.AwakenAnimationType), typeof(bool) })]
+        private static void BeforeSpawnCell() { spawnDepth++; }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(AIActor), "Spawn", new System.Type[] { typeof(AIActor), typeof(IntVector2), typeof(RoomHandler), typeof(bool), typeof(AIActor.AwakenAnimationType), typeof(bool) })]
+        private static System.Exception AfterSpawnCell(System.Exception __exception) { spawnDepth = Mathf.Max(0, spawnDepth - 1); return __exception; }
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIActor), "Spawn", new System.Type[] { typeof(AIActor), typeof(Vector2), typeof(RoomHandler), typeof(bool), typeof(AIActor.AwakenAnimationType), typeof(bool) })]
+        private static void BeforeSpawnPoint() { spawnDepth++; }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(AIActor), "Spawn", new System.Type[] { typeof(AIActor), typeof(Vector2), typeof(RoomHandler), typeof(bool), typeof(AIActor.AwakenAnimationType), typeof(bool) })]
+        private static System.Exception AfterSpawnPoint(System.Exception __exception) { spawnDepth = Mathf.Max(0, spawnDepth - 1); return __exception; }
+
+        // Who makes them: an enemy's behaviours (summoning, splitting into images), what an enemy leaves when it
+        // dies, and a transmogrify (the new animal counts as made by the enemy it replaces).
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(BehaviorSpeculator), "Update")]
+        private static void BeforeBehaviours(BehaviorSpeculator __instance) { PushSpawnParent(__instance.aiActor); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(BehaviorSpeculator), "Update")]
+        private static System.Exception AfterBehaviours(System.Exception __exception) { PopSpawnParent(); return __exception; }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(SpawnEnemyOnDeath), "SpawnEnemies")]
+        private static void BeforeDeathSpawn(SpawnEnemyOnDeath __instance) { PushSpawnParent(__instance.aiActor); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(SpawnEnemyOnDeath), "SpawnEnemies")]
+        private static System.Exception AfterDeathSpawn(System.Exception __exception) { PopSpawnParent(); return __exception; }
+
+        // Enemies the room itself adds (challenge modes, other mods' extra enemies) are nobody's, whatever enemy's
+        // turn it happened to be when the room added them.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(RoomHandler), "AddSpecificEnemyToRoomProcedurally")]
+        private static void BeforeRoomAdds() { PushSpawnParent(null); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(RoomHandler), "AddSpecificEnemyToRoomProcedurally")]
+        private static System.Exception AfterRoomAdds(System.Exception __exception) { PopSpawnParent(); return __exception; }
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(RoomHandler), "MakeRoomMoreDifficult")]
+        private static void BeforeRoomHarder() { PushSpawnParent(null); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(RoomHandler), "MakeRoomMoreDifficult")]
+        private static System.Exception AfterRoomHarder(System.Exception __exception) { PopSpawnParent(); return __exception; }
+
+        // ---- Transmogrify ----
+        // A gun or item turns an enemy into another kind (a chicken, a snake, a weaker enemy). The old enemy is not
+        // killed but taken out of the game, so nothing was sent: it stayed a full enemy in every other game. The
+        // game it happens in now says which enemy became what, and the others do the same change. The new animal
+        // counts as made by the enemy it replaces, so it gets the same number everywhere (see above).
+        private static bool applyingTransmog;
+        public static int TransmogsSent, TransmogsCopied;
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIActor), "Transmogrify")]
+        private static void BeforeTransmogrify(AIActor __instance, AIActor __0, GameObject __1)
+        {
+            PushSpawnParent(__instance);
+            if (applyingTransmog || !Connected || __0 == null)
+                return;
+            int id;
+            if (!idOf.TryGetValue(__instance, out id))
+                return;
+            // The game's own conditions: when one fails nothing happens here, so nothing is sent.
+            HealthHaver h = __instance.healthHaver;
+            if ((__instance.IsTransmogrified && __instance.ActorName == __0.ActorName) || __instance.IsMimicEnemy
+                || h == null || h.IsBoss || !h.IsVulnerable || __instance.ParentRoom == null)
+                return;
+            string to = __0.EnemyGuid;
+            if (string.IsNullOrEmpty(to))
+                return;
+            int level = LevelSync.CurrentLevelCode();
+            int kind = KindHash(__instance.EnemyGuid);
+            bool poof = __1 != null;
+            TransmogsSent++;
+            session.SendReliable(MsgType.Transmogrify, delegate (BinaryWriter w)
+            {
+                w.Write(level); w.Write(id); w.Write(kind); w.Write(to); w.Write(poof);
+            });
+        }
+
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(AIActor), "Transmogrify")]
+        private static System.Exception AfterTransmogrify(System.Exception __exception) { PopSpawnParent(); return __exception; }
+
+        public static void OnTransmogrify(BinaryReader r)
+        {
+            int level = r.ReadInt32();
+            int id = r.ReadInt32();
+            int kind = r.ReadInt32();
+            string to = r.ReadString();
+            bool poof = r.ReadBoolean();
+            if (level != LevelSync.CurrentLevelCode() || string.IsNullOrEmpty(to) || to.Length > 64)
+                return;
+            CheckFloor();
+            // Not while a boss is being introduced here: the intro is still playing this enemy's animations, and
+            // taking the enemy away under it threw an error every frame from then on (seen with one of the Bullet
+            // King's servants, changed by a player whose intro was already over). It waits for the intro to end.
+            if (GameManager.IsBossIntro && pendingTransmogs.Count < 32)
+            {
+                PendingTransmog late = new PendingTransmog();
+                late.Id = id; late.Kind = kind; late.To = to; late.Poof = poof;
+                pendingTransmogs.Add(late);
+                return;
+            }
+            ApplyTransmog(id, kind, to, poof);
+        }
+
+        private struct PendingTransmog
+        {
+            public int Id, Kind;
+            public string To;
+            public bool Poof;
+        }
+        private static readonly List<PendingTransmog> pendingTransmogs = new List<PendingTransmog>();
+
+        private static void FlushPendingTransmogs()
+        {
+            if (pendingTransmogs.Count == 0 || GameManager.IsBossIntro)
+                return;
+            List<PendingTransmog> now = new List<PendingTransmog>(pendingTransmogs);
+            pendingTransmogs.Clear();
+            foreach (PendingTransmog t in now)
+                ApplyTransmog(t.Id, t.Kind, t.To, t.Poof);
+        }
+
+        private static void ApplyTransmog(int id, int kind, string to, bool poof)
+        {
+            AIActor a;
+            // Gone or dead here already, or the number belongs to another kind of enemy here: nothing to change.
+            if (!byId.TryGetValue(id, out a) || a == null || a.healthHaver == null || a.healthHaver.IsDead
+                || KindHash(a.EnemyGuid) != kind)
+                return;
+            AIActor prefab = EnemyDatabase.GetOrLoadByGuid(to);
+            if (prefab == null)
+                return;
+            GameObject vfx = poof ? ResourceCache.Acquire("Global VFX/VFX_Item_Spawn_Poof") as GameObject : null;
+            HealthHaver h = a.healthHaver;
+            bool wasVulnerable = h.IsVulnerable;
+            string name = a.name;
+            applyingTransmog = true;
+            remotelyKilled.Add(a); // its money dropped in the game that did this (the purse is shared)
+            try
+            {
+                h.IsVulnerable = true; // it happened in the other game; a brief "can't be hurt" here must not undo it
+                a.Transmogrify(prefab, vfx);
+                TransmogsCopied++;
+                Plugin.Log.LogInfo("Transmogrify from another game: " + name + " became " + prefab.name + ".");
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Couldn't copy a transmogrify of " + name + ": " + e.Message);
+            }
+            finally
+            {
+                applyingTransmog = false;
+                remotelyKilled.Remove(a);
+                if (!wasVulnerable && h != null)
+                    h.IsVulnerable = false; // as it was, if the game refused the change (harmless on one that is gone)
             }
         }
 
@@ -174,12 +420,22 @@ namespace GungeonOnline
                     return false; // the partner's game deals this damage and tells us
                 // While we're a ghost, only the living partner's game decides what enemies take damage or die
                 // (a ghost's pulse may knock enemies around, but must never kill them).
-                if (LocalIsGhost)
+                // (Unless the host's stand-in is alive: its hits happen in this game and nowhere else.)
+                if (LocalIsGhost && !StandInAlive)
                     return false;
             }
             if (!__instance.IsDead)
                 __state = __instance.GetCurrentHealth();
             return true;
+        }
+
+        private static bool StandInAlive
+        {
+            get
+            {
+                PlayerController bot = StandIn.Active ? StandIn.Player : null;
+                return bot != null && !bot.IsGhost && bot.healthHaver != null && !bot.healthHaver.IsDead;
+            }
         }
 
         private static bool LocalIsGhost
@@ -191,9 +447,98 @@ namespace GungeonOnline
             }
         }
 
+        // ---- Damage that only exists in the game of the player who dealt it ----
+        // A bullet's damage is sent hit by hit (above). Beams, sword swings, dodge rolls into enemies and a few
+        // items damage enemies without any bullet, and only in their owner's game (the others see a picture of the
+        // player, not a player). It was never sent: for a player not leading the room, an enemy took no damage on
+        // anyone else's screen and then died all at once. It is added up per enemy and sent ten times a second.
+        // Only for enemies we do NOT lead: the leader's own health reports already carry what the leader deals.
+        public static bool BeamHitting;       // a beam of a player in this game is doing its damage step
+        public static bool OwnerOnlyHitting;  // ... or a sword swing
+        private static readonly Dictionary<int, float> pendingDamage = new Dictionary<int, float>();
+        private static readonly Dictionary<int, string> pendingGuid = new Dictionary<int, string>();
+        private static float nextPendingFlushAt;
+        // The names the game gives such damage (HealthHaver.ApplyDamage's sourceName).
+        private static readonly HashSet<string> ownerOnlySources = NewOwnerOnlySources();
+
+        private static HashSet<string> NewOwnerOnlySources()
+        {
+            HashSet<string> s = new HashSet<string>();
+            s.Add("DODGEROLL"); s.Add("DODGEROLL OF AWESOME"); s.Add("Knife Shield"); s.Add("Orbital Shield");
+            s.Add("Aura"); s.Add("Katana"); s.Add("Hero's Sword"); s.Add("Ser Junkan"); s.Add("Wolf");
+            return s;
+        }
+
+        // A beam fired by a player who really is in this game (us, the stand-in, a companion of either) - not one of
+        // the copies drawn for other players' beams, which have us as owner but deal nothing.
+        private static bool OursToReport(BeamController b)
+        {
+            if (b == null || BeamSync.IsCopy(b))
+                return false;
+            GameActor o = b.Owner;
+            PlayerController p = o as PlayerController;
+            if (p == null)
+            {
+                AIActor c = o as AIActor;
+                p = c != null ? c.CompanionOwner : null;
+            }
+            return p != null;
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(BasicBeamController), "FrameUpdate")]
+        private static void BeforeBeamFrame(BasicBeamController __instance) { BeamHitting = Connected && OursToReport(__instance); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(BasicBeamController), "FrameUpdate")]
+        private static System.Exception AfterBeamFrame(System.Exception __exception) { BeamHitting = false; return __exception; }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(RaidenBeamController), "Update")]
+        private static void BeforeRaidenBeam(RaidenBeamController __instance) { BeamHitting = Connected && OursToReport(__instance); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(RaidenBeamController), "Update")]
+        private static System.Exception AfterRaidenBeam(System.Exception __exception) { BeamHitting = false; return __exception; }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(ReverseBeamController), "Update")]
+        private static void BeforeReverseBeam(ReverseBeamController __instance) { BeamHitting = Connected && OursToReport(__instance); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(ReverseBeamController), "Update")]
+        private static System.Exception AfterReverseBeam(System.Exception __exception) { BeamHitting = false; return __exception; }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(Gun), "DealSwordDamageToEnemy")]
+        private static void BeforeSwordHit() { OwnerOnlyHitting = Connected; }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(Gun), "DealSwordDamageToEnemy")]
+        private static System.Exception AfterSwordHit(System.Exception __exception) { OwnerOnlyHitting = false; return __exception; }
+
+        private static void FlushPendingDamage(float now)
+        {
+            if (pendingDamage.Count == 0 || now < nextPendingFlushAt)
+                return;
+            nextPendingFlushAt = now + 0.1f;
+            int level = LevelSync.CurrentLevelCode();
+            foreach (KeyValuePair<int, float> pair in pendingDamage)
+            {
+                int id = pair.Key;
+                float amount = pair.Value;
+                string guid = pendingGuid[id];
+                AIActor a;
+                if (amount <= 0f || !byId.TryGetValue(id, out a) || a == null || a.healthHaver == null || a.healthHaver.IsDead)
+                    continue; // died meanwhile: its death was sent
+                session.SendReliable(MsgType.EnemyDamage, delegate (BinaryWriter w)
+                {
+                    w.Write(level); w.Write(id); w.Write(guid); w.Write(amount);
+                });
+            }
+            pendingDamage.Clear();
+            pendingGuid.Clear();
+        }
+
         [HarmonyPostfix]
         [HarmonyPatch(typeof(HealthHaver), "ApplyDamage")]
-        private static void AfterApplyDamage(HealthHaver __instance, DamageCategory __4, float __state)
+        private static void AfterApplyDamage(HealthHaver __instance, string __2, DamageCategory __4, float __state)
         {
             if (applyingRemote || !Connected || __instance.aiActor == null || __state < 0f)
                 return;
@@ -205,11 +550,10 @@ namespace GungeonOnline
             string guid = __instance.aiActor.EnemyGuid;
             if (__instance.IsDead)
             {
-                deadIds.Add(id);
-                // Burning or poison ticks in every game at once: then only the room leader's game reports the death.
-                // Anything else that kills here (our bullet, explosion, companion) is ours to report.
-                if (__4 == DamageCategory.DamageOverTime && !LocalBulletHitting && !LeadsEnemy(__instance.aiActor))
-                    return;
+                deadIds[id] = KindHash(guid);
+                // Every death here is reported, burning and poison included. (Those used to be left to the room
+                // leader, on the idea that they tick in every game alike - but an effect that only landed in our
+                // game then killed the enemy here and nowhere else. A second report of the same death does nothing.)
                 session.SendReliable(MsgType.EnemyDied, delegate (BinaryWriter w)
                 {
                     w.Write(level); w.Write(id); w.Write(guid);
@@ -222,6 +566,14 @@ namespace GungeonOnline
                     w.Write(level); w.Write(id); w.Write(guid); w.Write(dealt);
                 });
             }
+            else if (dealt > 0f && (BeamHitting || OwnerOnlyHitting || (__2 != null && ownerOnlySources.Contains(__2)))
+                && !LeadsEnemy(__instance.aiActor))
+            {
+                float sum;
+                pendingDamage.TryGetValue(id, out sum);
+                pendingDamage[id] = sum + dealt;
+                pendingGuid[id] = guid;
+            }
         }
 
         public static void OnEnemyDamage(BinaryReader r)
@@ -230,12 +582,12 @@ namespace GungeonOnline
             int id = r.ReadInt32();
             string guid = r.ReadString();
             float amount = r.ReadSingle();
-            if (level != LevelSync.CurrentLevelCode())
+            if (level != LevelSync.CurrentLevelCode() || !Protocol.Finite(amount) || amount <= 0f)
                 return;
             CheckFloor();
             AIActor a = Find(id, guid);
             if (a != null)
-                ApplyRemoteDamage(a, amount);
+                ApplyRemoteDamage(a, amount, false);
         }
 
         public static void OnEnemyDied(BinaryReader r)
@@ -246,7 +598,7 @@ namespace GungeonOnline
             if (level != LevelSync.CurrentLevelCode())
                 return;
             CheckFloor();
-            deadIds.Add(id);
+            deadIds[id] = KindHash(guid);
             AIActor a = Find(id, guid);
             if (a != null)
                 KillFromPartner(a);
@@ -284,17 +636,94 @@ namespace GungeonOnline
             if (remotelyKilled.Count > 500)
                 remotelyKilled.Clear();
             remotelyKilled.Add(a);
-            ApplyRemoteDamage(a, KillHealth);
+            ApplyRemoteDamage(a, KillHealth, true);
             if (a == null || a.healthHaver == null || !a.healthHaver.IsDead)
+            {
                 remotelyKilled.Remove(a);
+                // The game refused the killing blow (the enemy can't be hurt right now: a boss between phases, an
+                // armored or counted-hits enemy, its very first frame). It is dead in the other game, so keep at it
+                // for a while instead of leaving it alive here for good.
+                if (a != null && a.healthHaver != null)
+                {
+                    float now = Time.realtimeSinceStartup, until;
+                    if (!killRetryUntil.TryGetValue(a, out until))
+                    {
+                        until = now + KillRetrySeconds;
+                        killRetryUntil[a] = until;
+                    }
+                    if (until > 0f && now < until)
+                    {
+                        if (!killQueue.Contains(a))
+                        {
+                            killQueue.Add(a);
+                            queuedAt[a] = now - 1.4f; // again in a tenth of a second
+                        }
+                    }
+                    else if (until > 0f)
+                    {
+                        // Still alive after the retries: something protects it for longer (a boss kept at a minimum
+                        // health until its own script lets go, armor). It is dead in the other game, so take the
+                        // protection away - what the game itself does for its own forced kills (pits, the boss kill
+                        // camera). Not in the middle of a scripted moment (an intro; a boss whose AI is switched off
+                        // for a transition): wait for that to end, but not for ever.
+                        BehaviorSpeculator spec = a.behaviorSpeculator;
+                        bool scripted = GameManager.IsBossIntro || (a.healthHaver.IsBoss && spec != null && !spec.enabled);
+                        if (scripted && now < until + ForceKillPatience)
+                        {
+                            if (!killQueue.Contains(a))
+                            {
+                                killQueue.Add(a);
+                                queuedAt[a] = now - 1f; // look again in half a second
+                            }
+                        }
+                        else
+                        {
+                            killRetryUntil[a] = -1f; // one go; said once if that fails too
+                            if (!ForceKill(a))
+                                Plugin.Log.LogWarning("Couldn't kill " + a.name + " here although it died in another game.");
+                        }
+                    }
+                }
+            }
         }
 
-        private static void ApplyRemoteDamage(AIActor a, float amount)
+        private const float ForceKillPatience = 20f;
+
+        private static bool ForceKill(AIActor a)
+        {
+            HealthHaver h = a.healthHaver;
+            if (h == null)
+                return false;
+            if (h.IsDead)
+                return true;
+            Plugin.Log.LogInfo(a.name + " died in another game but is protected here: forcing it.");
+            h.minimumHealth = 0f;
+            h.PreventAllDamage = false;
+            h.IsVulnerable = true;
+            h.NextDamageIgnoresArmor = true;
+            h.Armor = 0f;
+            if (h.healthIsNumberOfHits)
+                h.ForceSetCurrentHealth(1f); // the hit below counts as exactly one
+            remotelyKilled.Add(a);
+            ApplyRemoteDamage(a, KillHealth, true);
+            if (!h.IsDead)
+                remotelyKilled.Remove(a);
+            return h.IsDead;
+        }
+
+        private const float KillRetrySeconds = 10f;
+        private static readonly Dictionary<AIActor, float> killRetryUntil = new Dictionary<AIActor, float>();
+
+        // kill: the blow that ends an enemy which died in another game. It goes in as "unstoppable" boss damage, the
+        // game's own way past "takes no damage right now" and "only special damage counts".
+        private static void ApplyRemoteDamage(AIActor a, float amount, bool kill)
         {
             applyingRemote = true;
             try
             {
-                a.healthHaver.ApplyDamage(amount, Vector2.zero, "Partner", CoreDamageTypes.None, DamageCategory.Normal, true, null, true);
+                a.healthHaver.ApplyDamage(amount, Vector2.zero, "Partner",
+                    kill ? CoreDamageTypes.SpecialBossDamage : CoreDamageTypes.None,
+                    kill ? DamageCategory.Unstoppable : DamageCategory.Normal, true, null, true);
             }
             finally
             {
@@ -316,7 +745,7 @@ namespace GungeonOnline
 
         // How long a message from that player took to get here: half the round trip to the host, or (a guest hearing
         // another guest, relayed by the host) the whole round trip - two legs. Unknown ping counts as none.
-        private static float OneWayDelay(int from)
+        internal static float OneWayDelay(int from)
         {
             float ms;
             if (session.Link.IsHost)
@@ -361,14 +790,42 @@ namespace GungeonOnline
 
         private static void Release(AIActor a)
         {
+            driveVelocity.Remove(a);
+            bool had;
+            hadOverride.TryGetValue(a, out had);
+            hadOverride.Remove(a);
             if (!driven.Remove(a) || a == null)
                 return;
-            a.BehaviorOverridesVelocity = false;
-            a.BehaviorVelocity = Vector2.zero;
+            // Back to what the game had: a few enemies (the Kill Pillars) always move by this override.
+            a.BehaviorOverridesVelocity = had;
+            if (!had)
+                a.BehaviorVelocity = Vector2.zero;
             if (a.behaviorSpeculator != null)
                 a.behaviorSpeculator.PreventMovement = false;
         }
+
+        // The velocity we drive each followed enemy with, written again right before the game reads it: some
+        // enemies' own scripts (the Treadnought, the Bashellisk) write zero every frame, and which write won
+        // depended on script order.
+        private static readonly Dictionary<AIActor, Vector2> driveVelocity = new Dictionary<AIActor, Vector2>();
+        private static readonly Dictionary<AIActor, bool> hadOverride = new Dictionary<AIActor, bool>();
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIActor), "Update")]
+        private static void BeforeActorUpdate(AIActor __instance)
+        {
+            if (driveVelocity.Count == 0)
+                return;
+            Vector2 v;
+            if (driveVelocity.TryGetValue(__instance, out v))
+            {
+                __instance.BehaviorOverridesVelocity = true;
+                __instance.BehaviorVelocity = v;
+            }
+        }
         private static readonly Dictionary<AIActor, Correction> corrections = new Dictionary<AIActor, Correction>();
+        private static readonly Dictionary<AIActor, float> lastSeenHealth = new Dictionary<AIActor, float>();
+        private static readonly Dictionary<AIActor, float> noClampUntil = new Dictionary<AIActor, float>();
         private const float SnapDistance = 4f;      // further than this: jump
         private const float SettleDistance = 0.25f; // closer than this: leave it alone
         private const float PullSpeed = 6f;         // how quickly a drifted enemy glides back
@@ -428,7 +885,22 @@ namespace GungeonOnline
 
         public static void Update()
         {
-            if (!Connected || !GameManager.HasInstance)
+            if (!Connected)
+            {
+                // Nobody leads these enemies any more: give them back their own movement. (They stayed switched off
+                // and slid along at their last reported speed for the rest of the floor.)
+                if (driven.Count > 0)
+                {
+                    foreach (AIActor a in new List<AIActor>(driven))
+                        Release(a);
+                    driven.Clear();
+                }
+                driveVelocity.Clear();
+                hadOverride.Clear();
+                corrections.Clear();
+                return;
+            }
+            if (!GameManager.HasInstance)
                 return;
             CheckFloor();
             float now = Time.realtimeSinceStartup;
@@ -452,7 +924,10 @@ namespace GungeonOnline
                 }
             }
 
+            TrackRemoteRooms(now);
+            FlushPendingTransmogs();
             ApplyCorrections();
+            FlushPendingDamage(now);
             ReportBothLead(now);
             UnsealIfStuck(now);
             KeepClearedRoomOpen(now);
@@ -462,13 +937,17 @@ namespace GungeonOnline
                 return;
             nextStateAt = now + StateInterval;
 
-            List<int> ids = new List<int>();
-            List<AIActor> actors = new List<AIActor>();
+            // The same two lists every time (this runs 15 times a second), and the per-frame "do we lead this room"
+            // answer instead of working it out again for every enemy.
+            List<int> ids = stateIds;
+            List<AIActor> actors = stateActors;
+            ids.Clear();
+            actors.Clear();
             foreach (KeyValuePair<int, AIActor> pair in byId)
             {
                 AIActor a = pair.Value;
                 if (a != null && a.healthHaver != null && !a.healthHaver.IsDead && a.gameObject.activeInHierarchy
-                    && InCharge(a.ParentRoom) && !LowerPlayerInRoom(a.ParentRoom))
+                    && a.ParentRoom != null && LeadsEnemy(a))
                 {
                     ids.Add(pair.Key);
                     actors.Add(a);
@@ -477,11 +956,87 @@ namespace GungeonOnline
             if (ids.Count == 0)
                 return;
             int level = LevelSync.CurrentLevelCode();
+            // 29 bytes an enemy: at most 40 per message keeps each under Steam's 1200-byte limit for messages sent
+            // without delivery guarantee (a bigger one isn't sent at all: a very crowded room got no updates).
+            for (int first = 0; first < ids.Count; first += MaxStatesPerMessage)
+                SendStates(level, ids, actors, first, Mathf.Min(ids.Count, first + MaxStatesPerMessage));
+        }
+
+        private const int MaxStatesPerMessage = 40;
+        private static readonly List<int> stateIds = new List<int>();
+        private static readonly List<AIActor> stateActors = new List<AIActor>();
+
+        // ---- Who may speak for a room (counted only, nothing is refused yet) ----
+        // Enemy positions, attacks and "room cleared" are accepted from any player, whoever leads the room. A check
+        // "the sender must be alive and in that room" would stop a game that is wrong about that from dragging
+        // enemies about or clearing rooms it isn't in - but it can also refuse honest messages: we only know where
+        // the others are from position updates that arrive a moment late (at a door, right after a warp into a
+        // fight). So for now it only counts what it WOULD refuse, once a minute in the log. If that stays at zero in
+        // normal play, MayLead can be made to refuse.
+        private static readonly RoomHandler[] lastRoomOf = new RoomHandler[Protocol.MaxPlayers];
+        private static readonly RoomHandler[] prevRoomOf = new RoomHandler[Protocol.MaxPlayers];
+        private static readonly float[] prevRoomUntil = new float[Protocol.MaxPlayers];
+        private static readonly int[] wouldRefuse = new int[Protocol.MaxPlayers];
+        private static readonly int[] leadMessages = new int[Protocol.MaxPlayers];
+
+        private static void TrackRemoteRooms(float now)
+        {
+            Dungeon d = GameManager.Instance.Dungeon;
+            string level = LevelSync.CurrentLevelKey();
+            foreach (RemotePlayerState p in session.Remotes)
+            {
+                if (p.Slot < 0 || p.Slot >= lastRoomOf.Length)
+                    continue;
+                RoomHandler room = null;
+                if (d != null && d.data != null && p.HasPlayer && p.Scene == level)
+                    room = d.data.GetAbsoluteRoomFromPosition(new IntVector2(Mathf.FloorToInt(p.FeetPosition.x), Mathf.FloorToInt(p.FeetPosition.y)));
+                if (room != lastRoomOf[p.Slot])
+                {
+                    prevRoomOf[p.Slot] = lastRoomOf[p.Slot];
+                    prevRoomUntil[p.Slot] = now + 2f;
+                    lastRoomOf[p.Slot] = room;
+                }
+            }
+        }
+
+        // Could this player be leading that room, as far as we can tell? The host always may (it also speaks for its
+        // stand-in and tells late arrivals which rooms are cleared). A guest: alive, on our floor, and in the room
+        // now, in it within the last two seconds, or within three tiles of it.
+        private static bool MayLead(int from, RoomHandler room)
+        {
+            if (from == 0 || room == null || room.area == null)
+                return true;
+            if (from < 0 || from >= Protocol.MaxPlayers)
+                return false;
+            RemotePlayerState p = session.Players[from];
+            if (!p.HasPlayer || p.IsDead || p.Scene != LevelSync.CurrentLevelKey())
+                return false;
+            if (lastRoomOf[from] == room)
+                return true;
+            if (prevRoomOf[from] == room && Time.realtimeSinceStartup < prevRoomUntil[from])
+                return true;
+            IntVector2 b = room.area.basePosition, s = room.area.dimensions;
+            Vector2 f = p.FeetPosition;
+            return f.x > b.x - 3f && f.x < b.x + s.x + 3f && f.y > b.y - 3f && f.y < b.y + s.y + 3f;
+        }
+
+        // Count one message that speaks for a room (see above). Never refuses.
+        public static void NoteLeadMessage(int from, RoomHandler room)
+        {
+            if (from < 0 || from >= Protocol.MaxPlayers)
+                return;
+            leadMessages[from]++;
+            if (!MayLead(from, room))
+                wouldRefuse[from]++;
+        }
+
+        private static void SendStates(int level, List<int> ids, List<AIActor> actors, int first, int end)
+        {
             session.SendUnreliable(MsgType.EnemyStates, delegate (BinaryWriter w)
             {
                 w.Write(level);
-                w.Write((ushort)ids.Count);
-                for (int i = 0; i < ids.Count; i++)
+                w.Write((ushort)(end - first));
+                for (int i = first; i < end; i++)
                 {
                     Vector2 p = actors[i].specRigidbody != null ? actors[i].specRigidbody.UnitCenter : (Vector2)actors[i].transform.position;
                     w.Write(ids[i]);
@@ -504,6 +1059,14 @@ namespace GungeonOnline
             if (now < nextBothLeadReportAt)
                 return;
             nextBothLeadReportAt = now + 60f;
+            for (int i = 0; i < wouldRefuse.Length; i++)
+            {
+                if (wouldRefuse[i] > 0)
+                    Plugin.Log.LogInfo("Room messages from player " + (i + 1) + " in the last minute: " + leadMessages[i] + ", of which "
+                        + wouldRefuse[i] + " for a room that player doesn't seem to be in (counted only, not refused).");
+                wouldRefuse[i] = 0;
+                leadMessages[i] = 0;
+            }
             for (int i = 0; i < bothLead.Length; i++)
             {
                 if (bothLead[i] > 0)
@@ -519,6 +1082,12 @@ namespace GungeonOnline
                 driftSum = driftWorst = delaySum = 0f;
                 driftCount = 0;
             }
+            if (TargetSync.AimsUsed > 0 || TransmogsSent > 0 || TransmogsCopied > 0)
+            {
+                Plugin.Log.LogInfo("In the last minute: " + TargetSync.AimsUsed + " copied attacks aimed at the leader's aim point; transmogrifies sent "
+                    + TransmogsSent + ", copied " + TransmogsCopied + ".");
+                TargetSync.AimsUsed = TransmogsSent = TransmogsCopied = 0;
+            }
         }
 
         public static void OnEnemyStates(BinaryReader r)
@@ -530,6 +1099,7 @@ namespace GungeonOnline
             CheckFloor();
             float now = Time.realtimeSinceStartup;
             float delay = OneWayDelay(session.From);
+            bool countedLead = false;
             for (int i = 0; i < count; i++)
             {
                 int id = r.ReadInt32();
@@ -538,6 +1108,8 @@ namespace GungeonOnline
                 int theirTarget = r.ReadByte();
                 Vector2 theirVelocity = new Vector2(r.ReadSingle(), r.ReadSingle());
                 int theirKind = r.ReadInt32();
+                if (!Protocol.Finite(theirPos) || !Protocol.Finite(theirVelocity) || !Protocol.Finite(theirHealth) || theirHealth < 0f)
+                    continue;
 
                 AIActor a;
                 if (!byId.TryGetValue(id, out a) || a == null || a.healthHaver == null || a.healthHaver.IsDead)
@@ -546,6 +1118,11 @@ namespace GungeonOnline
                 // alone rather than drag the wrong enemy around.
                 if (KindHash(a.EnemyGuid) != theirKind)
                     continue;
+                if (!countedLead)
+                {
+                    countedLead = true;
+                    NoteLeadMessage(session.From, a.ParentRoom);
+                }
                 // We lead that room ourselves (the lowest number in it): our copy is the one that counts. The sender
                 // thinks so too, so two games lead one room (briefly at a door is normal): counted for the log.
                 if (LeadsEnemy(a))
@@ -554,9 +1131,15 @@ namespace GungeonOnline
                     continue;
                 }
 
-                // Health only ever goes down to theirs (our own hits may not have reached them yet).
-                if (theirHealth < a.healthHaver.GetCurrentHealth())
+                // Health only ever goes down to theirs (our own hits may not have reached them yet). Unless our copy
+                // was just healed (a Bullet Bro enraging, a Shelleton coming back...): the leader's copy does the
+                // same a moment apart, and its older, lower number must not undo ours meanwhile.
+                float mine = a.healthHaver.GetCurrentHealth(), seen, hold;
+                if (lastSeenHealth.TryGetValue(a, out seen) && mine > seen + 0.01f)
+                    noClampUntil[a] = now + 1f;
+                if (theirHealth < mine && !(noClampUntil.TryGetValue(a, out hold) && now < hold))
                     a.healthHaver.ForceSetCurrentHealth(theirHealth);
+                lastSeenHealth[a] = a.healthHaver.GetCurrentHealth();
                 // Chase the same player as in the sender's game.
                 TargetSync.Force(a, theirTarget);
 
@@ -614,22 +1197,40 @@ namespace GungeonOnline
                     continue;
                 }
                 BehaviorSpeculator spec = a.behaviorSpeculator;
-                bool attacking = spec != null && spec.ActiveContinuousAttackBehavior != null;
-                if (spec != null && !attacking)
+                // The game itself is holding this enemy still or moving it (frozen solid, falling into a pit, gone
+                // mid-teleport, its AI switched off for a scripted moment): hands off, or an ice block slides.
+                if (a.IsFrozen || a.IsFalling || a.IsGone || (spec != null && !spec.enabled))
+                {
+                    Release(a);
+                    continue;
+                }
+                // Only an attack that owns the whole enemy (a charge, a leap) moves it instead of us. Shooting while
+                // walking does not: we used to let go for every attack, and then our copy walked its own way with a
+                // slow pull back toward the leader's - the sliding and rubber-banding during fights.
+                bool attackMovesIt = AttackSync.HasGlobalAttack(spec);
+                if (spec != null && !attackMovesIt)
                 {
                     // Walk it along the leader's path at the leader's pace (walking animations and walls included),
                     // instead of letting our copy wander its own way and pulling it back.
                     if (!driven.Contains(a))
                     {
                         driven.Add(a);
-                        spec.PreventMovement = true;
+                        hadOverride[a] = a.BehaviorOverridesVelocity;
                     }
+                    spec.PreventMovement = true; // every frame: some attacks switch it back off
                     Vector2 v = c.Velocity + delta * FollowGain;
                     float max = Mathf.Max(c.Velocity.magnitude, a.MovementSpeed) * 1.5f + 2f;
                     if (v.magnitude > max)
                         v = v.normalized * max;
+                    // The leader's copy stands and ours is close enough: stand too (no creeping, no turning about).
+                    if (c.Velocity.sqrMagnitude < 0.01f && dist < SettleDistance)
+                        v = Vector2.zero;
+                    // The game multiplies by our copy's own slow-down again; the leader's speed already includes it.
+                    else if (a.LocalTimeScale > 0.2f && a.LocalTimeScale < 1f)
+                        v /= a.LocalTimeScale;
+                    driveVelocity[a] = v;
                     a.BehaviorOverridesVelocity = true;
-                    a.BehaviorVelocity = dist < 0.05f && c.Velocity.sqrMagnitude < 0.01f ? Vector2.zero : v;
+                    a.BehaviorVelocity = v;
                     continue;
                 }
                 // Mid-attack (a charge, a leap...): the attack moves it; only gently pull a drift back.
@@ -668,7 +1269,10 @@ namespace GungeonOnline
             if (now - sealedEmptySince > 2f)
             {
                 Plugin.Log.LogInfo("Room is sealed with no enemies left (partner cleared it); unsealing.");
-                room.UnsealRoom();
+                // Our own guess, not a clear: don't tell the others (they would remove every later wave there).
+                applyingRemoteRoom = true;
+                try { room.UnsealRoom(); }
+                finally { applyingRemoteRoom = false; }
                 sealedEmptySince = -1f;
             }
         }
@@ -768,6 +1372,9 @@ namespace GungeonOnline
                 return;
             if (__instance.HasActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear))
                 return;
+            // The game can refuse to open a room (one an NPC or shrine keeps sealed): then nothing was cleared.
+            if (__instance.IsSealed)
+                return;
             CheckFloor();
             int roomIndex = GameManager.Instance.Dungeon.data.rooms.IndexOf(__instance);
             // Every game in the room clears it at about the same time: only the one leading it says so.
@@ -792,13 +1399,14 @@ namespace GungeonOnline
                 return;
             RoomHandler room = rooms[roomIndex];
             CheckFloor();
+            NoteLeadMessage(session.From, room);
             clearedByOthers.Add(roomIndex);
 
             // Every enemy we know in that room counts as dead from now on (also ones that haven't spawned yet).
             foreach (KeyValuePair<AIActor, int> pair in idOf)
             {
                 if (pair.Key != null && pair.Key.ParentRoom == room)
-                    deadIds.Add(pair.Value);
+                    deadIds[pair.Value] = KindHash(pair.Key.EnemyGuid);
             }
             List<AIActor> left = room.GetActiveEnemies(RoomHandler.ActiveEnemyType.RoomClear);
             int killed = 0;

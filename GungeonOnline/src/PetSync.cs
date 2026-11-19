@@ -34,8 +34,29 @@ namespace GungeonOnline
             session = netSession;
         }
 
+        // Who is petting our dog (-1: nobody). If they leave, die, walk off or change floor without saying "stopped",
+        // nothing in the game ends the petting we started by hand: end it here.
+        private static int petterSlot = -1;
+
         public static void Update()
         {
+            if (petterSlot >= 0)
+            {
+                RemotePlayerState petter = session != null && petterSlot < session.Players.Length ? session.Players[petterSlot] : null;
+                AIActor ourDog = OurPettableDog();
+                bool gone = petter == null || session.Status != NetSession.State.Connected || !petter.Connected || !petter.HasPlayer
+                    || petter.IsDead || petter.Scene != LevelSync.CurrentLevelKey() || ourDog == null
+                    || Vector2.Distance(petter.Position, ourDog.CenterPosition) > 4.5f;
+                if (gone)
+                {
+                    petterSlot = -1;
+                    if (ourDog != null)
+                    {
+                        ourDog.aiAnimator.EndAnimationIf("pet");
+                        ourDog.aiAnimator.LockFacingDirection = false;
+                    }
+                }
+            }
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             if (me == null || session == null || session.Status != NetSession.State.Connected)
             {
@@ -154,6 +175,7 @@ namespace GungeonOnline
             if (dog == null)
                 return;
             Plugin.Log.LogInfo(session.PeerName + " is petting our dog.");
+            petterSlot = session.From;
             dog.aiAnimator.LockFacingDirection = true;
             dog.aiAnimator.FacingDirection = petterOnLeft ? 180f : 0f;
             dog.aiAnimator.PlayUntilCancelled("pet", false, null, -1f, false);
@@ -168,6 +190,7 @@ namespace GungeonOnline
                 return;
             dog.aiAnimator.EndAnimationIf("pet");
             dog.aiAnimator.LockFacingDirection = false;
+            petterSlot = -1;
         }
     }
 }

@@ -94,6 +94,11 @@ namespace GungeonOnline
         // Copies we gave a motion module (pooled bullets get reused).
         private static readonly System.Collections.Generic.HashSet<Projectile> moved = new System.Collections.Generic.HashSet<Projectile>();
 
+        public static void Prune()
+        {
+            moved.RemoveWhere(delegate (Projectile p) { return p == null; });
+        }
+
         public static void Reset(Projectile p)
         {
             if (moved.Count > 400)

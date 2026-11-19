@@ -77,6 +77,13 @@ namespace GungeonOnline
             float knockbackForce = r.ReadSingle(), knockbackRadius = r.ReadSingle();
             float extraTime = r.ReadSingle();
             bool breaksWalls = r.ReadBoolean(), skipBreakables = r.ReadBoolean();
+            if (!Protocol.Finite(center) || !Protocol.Finite(expandSpeed) || !Protocol.Finite(maxRadius) || !Protocol.Finite(distIntensity)
+                || !Protocol.Finite(distRadius) || !Protocol.Finite(pushForce) || !Protocol.Finite(pushRadius)
+                || !Protocol.Finite(knockbackForce) || !Protocol.Finite(knockbackRadius) || !Protocol.Finite(extraTime))
+                return;
+            // A blank lasts moments and covers a room or so, whatever the other game says.
+            maxRadius = Mathf.Clamp(maxRadius, 0f, 100f);
+            extraTime = Mathf.Clamp(extraTime, 0f, 10f);
 
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
             if (me == null || level != LevelSync.CurrentLevelKey())
@@ -91,7 +98,9 @@ namespace GungeonOnline
             {
                 SilencerInstance silencer = new GameObject("silencer").AddComponent<SilencerInstance>();
                 silencer.TriggerSilencer(center, expandSpeed, maxRadius, vfx, distIntensity, distRadius, pushForce, pushRadius,
-                    knockbackForce, knockbackRadius, extraTime, me, breaksWalls, skipBreakables);
+                    knockbackForce, knockbackRadius, extraTime, null, breaksWalls, skipBreakables);
+                // "null": nobody here triggered it. With our own player as its user, the game applied OUR blank
+                // items to the partner's blank (ammo back for us, our Ammolet's fire or poison on the enemies).
             }
             finally
             {

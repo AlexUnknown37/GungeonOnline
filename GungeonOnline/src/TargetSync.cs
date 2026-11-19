@@ -50,6 +50,9 @@ namespace GungeonOnline
                 if (targets[i] == t)
                     return i;
             }
+            Aim aim;
+            if (aims.TryGetValue(enemy, out aim) && aim.Body == t)
+                return aim.Slot;
             return Protocol.NoSlot;
         }
 
@@ -60,10 +63,42 @@ namespace GungeonOnline
                 return;
             forced[enemy] = new KeyValuePair<int, float>(slot, Time.realtimeSinceStartup);
             int want;
+            // This enemy only, and right now: AttackSync starts the copied attack straight after this call, and it
+            // must aim at the new target. (Walking every chased enemy here, once per enemy per message, was n x n
+            // work 15 times a second; Update still does the full walk once a frame.)
             if (Resolve(slot, out want))
             {
                 chasing[enemy] = want;
-                ReapplyOverrides();
+                ApplyOverride(enemy, want);
+            }
+        }
+
+        private static void ApplyOverride(AIActor enemy, int value)
+        {
+            Aim aim;
+            if (aims.Count > 0 && aims.TryGetValue(enemy, out aim))
+            {
+                // A copied attack is still young: aim where the leader's game aimed, easing back to our own view.
+                float t = (Time.realtimeSinceStartup - aim.Start) / AimHold;
+                Vector2 ours;
+                if (t < 1f && aim.Want == value && ViewOf(value, out ours) && PlaceAim(aim, ours + aim.Offset * (1f - t)))
+                {
+                    if (enemy.OverrideTarget != aim.Body)
+                        enemy.OverrideTarget = aim.Body;
+                    return;
+                }
+                DropAim(enemy);
+            }
+            SpeculativeRigidbody want = value == Bot ? (StandIn.Player != null ? StandIn.Player.specRigidbody : null)
+                : value != Me && active[value] ? targets[value] : null;
+            if (want != null)
+            {
+                if (enemy.OverrideTarget != want)
+                    enemy.OverrideTarget = want;
+            }
+            else if (IsOurBody(enemy.OverrideTarget))
+            {
+                enemy.OverrideTarget = null;
             }
         }
 
@@ -110,7 +145,184 @@ namespace GungeonOnline
                 if (targets[i] == body)
                     return true;
             }
-            return false;
+            return aimBodies.Contains(body);
+        }
+
+        // ---- The leader's aim point ----
+        // The game leading a room sends, with each attack it starts, the spot where it sees the attacked player. Every
+        // game sees the others a network delay late (and its own player not late at all), so "the same attack at the
+        // same player" was aimed a little differently in each game. For the first half second of a copied attack
+        // the enemy here aims at a body of its own that stands where the leader saw the player, and glides back to
+        // where we see them. Too small to matter (a tenth of a tile) or absurd (six tiles): left alone.
+        private class Aim
+        {
+            public GameObject Go;
+            public SpeculativeRigidbody Body;
+            public Vector2 Offset;
+            public float Start;
+            public int Want, Slot;
+        }
+        private const float AimHold = 0.5f;
+        private const float AimMin = 0.1f, AimMax = 6f;
+        private static readonly Dictionary<AIActor, Aim> aims = new Dictionary<AIActor, Aim>();
+        private static readonly List<Aim> spareAims = new List<Aim>();
+        private static readonly HashSet<SpeculativeRigidbody> aimBodies = new HashSet<SpeculativeRigidbody>();
+        public static int AimsUsed;
+
+        // Where our game sees a chase target (us, the stand-in, another player's body) right now.
+        private static bool ViewOf(int want, out Vector2 center)
+        {
+            center = Vector2.zero;
+            PlayerController p = null;
+            if (want == Me)
+                p = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+            else if (want == Bot)
+                p = StandIn.Player;
+            else if (want >= 0 && want < targets.Length && active[want])
+            {
+                center = centers[want];
+                return true;
+            }
+            if (p == null || p.specRigidbody == null)
+                return false;
+            center = p.specRigidbody.GetUnitCenter(ColliderType.HitBox);
+            return true;
+        }
+
+        public static void AimAt(AIActor enemy, int slot, Vector2 leaderAim)
+        {
+            if (enemy == null)
+                return;
+            int want;
+            Vector2 ours;
+            if (!Protocol.Finite(leaderAim) || !PhysicsEngine.HasInstance || !Resolve(slot, out want) || !ViewOf(want, out ours))
+            {
+                DropAim(enemy);
+                return;
+            }
+            Vector2 offset = leaderAim - ours;
+            float far = offset.magnitude;
+            if (far < AimMin || far > AimMax)
+            {
+                DropAim(enemy);
+                return;
+            }
+            Aim aim;
+            if (!aims.TryGetValue(enemy, out aim))
+            {
+                while (aim == null && spareAims.Count > 0)
+                {
+                    aim = spareAims[spareAims.Count - 1];
+                    spareAims.RemoveAt(spareAims.Count - 1);
+                    if (aim.Go == null || aim.Body == null)
+                        aim = null; // went with the last floor
+                }
+                if (aim == null)
+                {
+                    aimBodies.RemoveWhere(delegate (SpeculativeRigidbody b) { return b == null; });
+                    aim = new Aim();
+                    aim.Go = new GameObject("GungeonOnline Aim Point");
+                    aim.Body = NewBody(aim.Go);
+                    aimBodies.Add(aim.Body);
+                }
+                aims[enemy] = aim;
+            }
+            aim.Offset = offset;
+            aim.Start = Time.realtimeSinceStartup;
+            aim.Want = want;
+            aim.Slot = slot;
+            if (!PlaceAim(aim, leaderAim))
+            {
+                DropAim(enemy);
+                return;
+            }
+            enemy.OverrideTarget = aim.Body;
+            AimsUsed++;
+        }
+
+        private static bool PlaceAim(Aim aim, Vector2 center)
+        {
+            if (aim.Go == null || aim.Body == null)
+                return false;
+            try
+            {
+                if (!aim.Go.activeSelf)
+                    aim.Go.SetActive(true);
+                aim.Go.transform.position = new Vector3(center.x, center.y, aim.Go.transform.position.z);
+                if (!aim.Body.enabled)
+                    aim.Body.enabled = true;
+                aim.Body.Reinitialize();
+                return true;
+            }
+            catch (System.Exception)
+            {
+                return false;
+            }
+        }
+
+        private static void DropAim(AIActor enemy)
+        {
+            Aim aim;
+            if (!aims.TryGetValue(enemy, out aim))
+                return;
+            aims.Remove(enemy);
+            if (enemy != null && aim.Body != null && enemy.OverrideTarget == aim.Body)
+                enemy.OverrideTarget = null;
+            if (aim.Go != null && aim.Body != null)
+            {
+                aim.Go.SetActive(false);
+                spareAims.Add(aim);
+            }
+        }
+
+        // ---- Homing rockets ----
+        // An enemy's homing rocket picks the nearest player OF THIS GAME when it is fired: in every game it went for
+        // that game's own player, whoever the enemy was attacking. It now homes on the player the enemy is after
+        // (the one the leading game named): another player's place on our screen, or our own player.
+        private static readonly System.Reflection.FieldInfo rocketTarget = HarmonyLib.AccessTools.Field(typeof(RobotechProjectile), "m_currentTarget");
+
+        private class RemoteAim : IAutoAimTarget
+        {
+            public int Slot;
+            public bool IsValid { get { return Slot >= 0 && Slot < active.Length && active[Slot]; } }
+            public Vector2 AimCenter { get { return centers[Slot]; } }
+            public Vector2 Velocity { get { return Vector2.zero; } }
+            public bool IgnoreForSuperDuperAutoAim { get { return true; } }
+            public float MinDistForSuperDuperAutoAim { get { return 0f; } }
+        }
+
+        [HarmonyLib.HarmonyPostfix]
+        [HarmonyLib.HarmonyPatch(typeof(RobotechProjectile), "Start")]
+        private static void AfterRocketStart(RobotechProjectile __instance)
+        {
+            if (rocketTarget == null || session == null || session.Status != NetSession.State.Connected
+                || __instance.initialOverrideTargetPoint.HasValue)
+                return;
+            AIActor owner = __instance.Owner as AIActor;
+            if (owner == null || owner.CompanionOwner != null)
+                return;
+            SpeculativeRigidbody t = owner.TargetRigidbody;
+            if (t == null)
+                return;
+            PlayerController local = t.gameActor as PlayerController;
+            if (local != null)
+            {
+                rocketTarget.SetValue(__instance, local);
+                return;
+            }
+            int slot = SlotOfTarget(owner);
+            if (slot == session.LocalSlot)
+            {
+                PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
+                if (me != null)
+                    rocketTarget.SetValue(__instance, me);
+            }
+            else if (slot >= 0 && slot < active.Length && active[slot])
+            {
+                RemoteAim remote = new RemoteAim();
+                remote.Slot = slot;
+                rocketTarget.SetValue(__instance, remote);
+            }
         }
 
         public static void Init(NetSession netSession, HarmonyLib.Harmony harmony)
@@ -247,17 +459,7 @@ namespace GungeonOnline
                     gone.Add(enemy);
                     continue;
                 }
-                SpeculativeRigidbody want = pair.Value == Bot ? (StandIn.Player != null ? StandIn.Player.specRigidbody : null)
-                    : pair.Value != Me && active[pair.Value] ? targets[pair.Value] : null;
-                if (want != null)
-                {
-                    if (enemy.OverrideTarget != want)
-                        enemy.OverrideTarget = want;
-                }
-                else if (IsOurBody(enemy.OverrideTarget))
-                {
-                    enemy.OverrideTarget = null;
-                }
+                ApplyOverride(enemy, pair.Value);
             }
             if (gone != null)
             {
@@ -265,6 +467,7 @@ namespace GungeonOnline
                 {
                     chasing.Remove(enemy);
                     forced.Remove(enemy);
+                    DropAim(enemy);
                 }
             }
         }
@@ -278,6 +481,11 @@ namespace GungeonOnline
             }
             chasing.Clear();
             forced.Clear();
+            if (aims.Count > 0)
+            {
+                foreach (AIActor enemy in new List<AIActor>(aims.Keys))
+                    DropAim(enemy);
+            }
         }
 
         private static readonly List<AIActor> enemies = new List<AIActor>();
@@ -379,9 +587,15 @@ namespace GungeonOnline
             if (targets[slot] != null && targetGos[slot] != null)
                 return true;
             GameObject targetGo = new GameObject("GungeonOnline Partner Target " + (slot + 1));
-            SpeculativeRigidbody target = targetGo.AddComponent<SpeculativeRigidbody>();
             targetGos[slot] = targetGo;
-            targets[slot] = target;
+            targets[slot] = NewBody(targetGo);
+            Plugin.Log.LogInfo("Created player " + (slot + 1) + "'s target body for enemies.");
+            return true;
+        }
+
+        private static SpeculativeRigidbody NewBody(GameObject targetGo)
+        {
+            SpeculativeRigidbody target = targetGo.AddComponent<SpeculativeRigidbody>();
             target.CollideWithOthers = false;
             target.CollideWithTileMap = false;
             target.CanBePushed = false;
@@ -396,8 +610,7 @@ namespace GungeonOnline
             target.PixelColliders.Add(box);
             // Disabled until Update has checked the physics system is ready (it then enables + initializes it).
             target.enabled = false;
-            Plugin.Log.LogInfo("Created player " + (slot + 1) + "'s target body for enemies.");
-            return true;
+            return target;
         }
     }
 }

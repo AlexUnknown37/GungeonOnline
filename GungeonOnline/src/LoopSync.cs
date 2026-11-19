@@ -414,6 +414,9 @@ namespace GungeonOnline
             {
                 knownHostLoops = -1;
                 hostOptions.Clear();
+                // A new session counts its loops from the start again (or its loop 1 would be "already done").
+                loopTarget = -1;
+                loopCountedFor = -1;
             }
             if (!Present || session == null || session.Link == null || !session.Link.IsHost || session.Status != NetSession.State.Connected)
             {
@@ -484,6 +487,12 @@ namespace GungeonOnline
             if (!setUp)
                 SetUp();
             int hostLoops = r.ReadInt32();
+            // A new run (the host's loop number went back): its loops are not "already done" from the last run.
+            if (hostLoops < loopCountedFor)
+            {
+                loopTarget = -1;
+                loopCountedFor = -1;
+            }
             int count = r.ReadInt32();
             for (int i = 0; i < count; i++)
             {

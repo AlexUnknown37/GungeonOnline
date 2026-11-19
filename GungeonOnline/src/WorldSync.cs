@@ -76,7 +76,7 @@ namespace GungeonOnline
         private static void AfterMinorBreak(MinorBreakable __instance, Vector2 direction, bool __state)
         {
             if (!__state && __instance.IsBroken)
-                SendBreak(Kind.Minor, __instance.gameObject, __instance.transform.position, direction);
+                SendBreak(Kind.Minor, __instance.gameObject, HomeOf(__instance, __instance.transform.position), direction);
         }
 
         [HarmonyPrefix]
@@ -91,7 +91,7 @@ namespace GungeonOnline
         private static void AfterMinorBreakNoDir(MinorBreakable __instance, bool __state)
         {
             if (!__state && __instance.IsBroken)
-                SendBreak(Kind.Minor, __instance.gameObject, __instance.transform.position, Vector2.zero);
+                SendBreak(Kind.Minor, __instance.gameObject, HomeOf(__instance, __instance.transform.position), Vector2.zero);
         }
 
         [HarmonyPrefix]
@@ -106,7 +106,7 @@ namespace GungeonOnline
         private static void AfterMajorBreak(MajorBreakable __instance, Vector2 sourceDirection, bool __state)
         {
             if (!__state && __instance.IsDestroyed && __instance.GetComponent<FlippableCover>() == null)
-                SendBreak(Kind.Major, __instance.gameObject, __instance.transform.position, sourceDirection);
+                SendBreak(Kind.Major, __instance.gameObject, HomeOf(__instance, __instance.transform.position), sourceDirection);
         }
 
         [HarmonyPostfix]
@@ -116,6 +116,51 @@ namespace GungeonOnline
             TableInfo info;
             if (tables.TryGetValue(__instance, out info))
                 SendBreak(Kind.Table, __instance.gameObject, info.Home, Vector2.zero);
+        }
+
+        // ---- Where each breakable started ----
+        // Books, bottles and plates get knocked about, differently in every game, so "the green book at (x, y)"
+        // often named a spot where another game has a different book by then (in a two-copy test about half of
+        // all broken table-top objects were not found). Every game builds the same floor, so where a thing STARTED
+        // is the same everywhere: breaks are sent and matched by that.
+        private static readonly Dictionary<Component, Vector2> homes = new Dictionary<Component, Vector2>();
+        private static Dungeonator.Dungeon homesFloor;
+        private static float nextHomeScan;
+
+        private static void TrackHomes()
+        {
+            Dungeonator.Dungeon d = GameManager.Instance.Dungeon;
+            float now = Time.realtimeSinceStartup;
+            if (d != homesFloor)
+            {
+                homes.Clear();
+                brokenOnFloor.Clear();
+                homesFloor = d;
+                nextHomeScan = 0f;
+            }
+            if (d == null || now < nextHomeScan)
+                return;
+            nextHomeScan = now + 2f; // things made later (frozen-enemy crystals...) get the place we first saw them
+            AddHomes(StaticReferenceManager.AllMinorBreakables);
+            AddHomes(StaticReferenceManager.AllMajorBreakables);
+        }
+
+        private static void AddHomes<T>(List<T> list) where T : Component
+        {
+            if (list == null)
+                return;
+            for (int i = 0; i < list.Count; i++)
+            {
+                T c = list[i];
+                if (c != null && !homes.ContainsKey(c))
+                    homes[c] = c.transform.position;
+            }
+        }
+
+        private static Vector2 HomeOf(Component c, Vector2 otherwise)
+        {
+            Vector2 home;
+            return c != null && homes.TryGetValue(c, out home) ? home : otherwise;
         }
 
         // What broke here lately (by anything, including copies of other players' bullets): when another player's
@@ -128,8 +173,20 @@ namespace GungeonOnline
         }
         private static readonly List<RecentBreak> recentBreaks = new List<RecentBreak>();
 
+        // Everything that broke here on this floor, by name and starting place. The same object can break at very
+        // different moments in two games (flung off a flipped table, it shatters on landing in one game and lies
+        // there until a stray bullet finds it in the other). The later report then found "no unbroken match" - it
+        // was broken here long ago - and each such miss cost two searches of the whole scene and a warning.
+        private static readonly HashSet<string> brokenOnFloor = new HashSet<string>();
+
+        private static string BrokenKey(string name, Vector2 pos)
+        {
+            return name + "|" + Mathf.RoundToInt(pos.x * 4f) + "," + Mathf.RoundToInt(pos.y * 4f);
+        }
+
         private static void RememberBreak(string name, Vector2 pos)
         {
+            brokenOnFloor.Add(BrokenKey(name, pos));
             float now = Time.realtimeSinceStartup;
             recentBreaks.RemoveAll(delegate (RecentBreak b) { return now - b.At > 10f; });
             if (recentBreaks.Count > 300)
@@ -184,13 +241,13 @@ namespace GungeonOnline
             applyingRemote = true;
             try
             {
-                if (kind != Kind.Table && BrokeHereLately(name, pos))
+                if (kind != Kind.Table && (BrokeHereLately(name, pos) || brokenOnFloor.Contains(BrokenKey(name, pos))))
                 {
                     // Broken here already (usually by the copy of the same bullet).
                 }
                 else if (kind == Kind.Minor)
                 {
-                    MinorBreakable m = Nearest<MinorBreakable>(name, pos, delegate (MinorBreakable b) { return !b.IsBroken; });
+                    MinorBreakable m = Nearest<MinorBreakable>(StaticReferenceManager.AllMinorBreakables, name, pos, delegate (MinorBreakable b) { return !b.IsBroken; });
                     if (m != null)
                         m.Break(direction);
                     else
@@ -198,7 +255,7 @@ namespace GungeonOnline
                 }
                 else if (kind == Kind.Major)
                 {
-                    MajorBreakable m = Nearest<MajorBreakable>(name, pos, delegate (MajorBreakable b) { return !b.IsDestroyed; });
+                    MajorBreakable m = Nearest<MajorBreakable>(StaticReferenceManager.AllMajorBreakables, name, pos, delegate (MajorBreakable b) { return !b.IsDestroyed; });
                     if (m != null)
                         m.Break(direction);
                     else
@@ -220,6 +277,11 @@ namespace GungeonOnline
         // Our copy of what the partner broke wasn't found: log the closest candidate so we can see why.
         private static void ExplainMiss<T>(Kind kind, string name, Vector2 pos) where T : Component
         {
+            // At most one explanation every two seconds: each one searches the whole floor and writes to the log,
+            // and a blank or explosion can miss dozens at once.
+            if (Time.realtimeSinceStartup < nextMissLog)
+                return;
+            nextMissLog = Time.realtimeSinceStartup + 2f;
             T closest = null;
             float dist = float.MaxValue;
             foreach (T c in Object.FindObjectsOfType(typeof(T)))
@@ -237,22 +299,37 @@ namespace GungeonOnline
                 + typeof(T).Name + ": " + (closest == null ? "none" : "'" + BaseName(closest.gameObject) + "' " + dist.ToString("F2") + " away"));
         }
 
-        private static T Nearest<T>(string name, Vector2 pos, System.Predicate<T> ok) where T : Component
+        private static float nextMissLog;
+
+        // The game keeps its own list of every breakable: look there first. Searching the whole scene for each
+        // broken pot (one message per pot, dozens from one blank) is slow; that search is now only the fallback
+        // for something the list doesn't have.
+        private static T Nearest<T>(List<T> known, string name, Vector2 pos, System.Predicate<T> ok) where T : Component
         {
             T best = null;
             float bestDist = MatchDistance;
-            foreach (T c in Object.FindObjectsOfType(typeof(T)))
+            if (known != null)
             {
-                if (c == null || !ok(c) || BaseName(c.gameObject) != name)
-                    continue;
-                float d = Vector2.Distance(c.transform.position, pos);
-                if (d < bestDist)
-                {
-                    best = c;
-                    bestDist = d;
-                }
+                for (int i = 0; i < known.Count; i++)
+                    Consider(known[i], name, pos, ok, ref best, ref bestDist);
             }
+            if (best != null)
+                return best;
+            foreach (T c in Object.FindObjectsOfType(typeof(T)))
+                Consider(c, name, pos, ok, ref best, ref bestDist);
             return best;
+        }
+
+        // Distance first: it's cheap, and comparing names makes new strings for every candidate.
+        private static void Consider<T>(T c, string name, Vector2 pos, System.Predicate<T> ok, ref T best, ref float bestDist) where T : Component
+        {
+            if (c == null || !ok(c))
+                return;
+            float d = Vector2.Distance(HomeOf(c, c.transform.position), pos);
+            if (d >= bestDist || BaseName(c.gameObject) != name)
+                return;
+            best = c;
+            bestDist = d;
         }
 
         // ---- Table flips ----
@@ -359,10 +436,10 @@ namespace GungeonOnline
             float bestDist = MatchDistance;
             foreach (KeyValuePair<KickableObject, TableInfo> pair in barrels)
             {
-                if (pair.Key == null || BaseName(pair.Key.gameObject) != name)
+                if (pair.Key == null)
                     continue;
                 float d = Vector2.Distance(pair.Value.Home, home);
-                if (d < bestDist)
+                if (d < bestDist && BaseName(pair.Key.gameObject) == name)
                 {
                     best = pair.Key;
                     bestDist = d;
@@ -434,10 +511,10 @@ namespace GungeonOnline
             float bestDist = MatchDistance;
             foreach (KeyValuePair<FlippableCover, TableInfo> pair in tables)
             {
-                if (pair.Key == null || BaseName(pair.Key.gameObject) != name)
+                if (pair.Key == null)
                     continue;
                 float d = Vector2.Distance(pair.Value.Home, home);
-                if (d < bestDist)
+                if (d < bestDist && BaseName(pair.Key.gameObject) == name)
                 {
                     best = pair.Key;
                     bestDist = d;
@@ -464,6 +541,10 @@ namespace GungeonOnline
 
         public static void Update()
         {
+            // Starting places are noted whenever we're in a session at all (a host alone included: whoever joins
+            // later needs ours to be from before things were knocked about).
+            if (session != null && session.Link != null && GameManager.HasInstance && !GameManager.Instance.IsLoadingLevel)
+                TrackHomes();
             if (!Connected || !GameManager.HasInstance || GameManager.Instance.IsLoadingLevel)
                 return;
             float now = Time.realtimeSinceStartup;
@@ -685,6 +766,11 @@ namespace GungeonOnline
                     if (info.MovedAt >= 0f && Time.realtimeSinceStartup - info.MovedAt < SettleTime)
                         continue;
                     // Their body is pushing our copy too: let it play out, then settle where they say.
+                    // Whoever moved it last says where it is: once we take their position, the table is no longer
+                    // "one we moved", or our every-few-seconds resync would keep sending our older place for it and
+                    // slide it back on their screen.
+                    info.MovedAt = -1f;
+                    info.SettleSent = true;
                     if (info.RemotePushAt >= 0f && Time.realtimeSinceStartup - info.RemotePushAt < 2f)
                     {
                         info.Final = pos;

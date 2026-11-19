@@ -197,7 +197,10 @@ namespace GungeonOnline
             if (!waitingAtExit)
             {
                 Plugin.Log.LogInfo("We took the exit before the host: waiting for the host to load first.");
-                session.SendReliable(MsgType.AtExit, null);
+                // With where our exit leads (a trapdoor or other special exit; empty for the normal next floor): a
+                // host who is a ghost takes it for us.
+                string exitLevel = custom ?? "";
+                session.SendReliable(MsgType.AtExit, delegate (BinaryWriter w) { w.Write(exitLevel); });
             }
             waitingAtExit = true;
             waitingCustom = custom;
@@ -208,9 +211,38 @@ namespace GungeonOnline
             return true;
         }
 
-        public static void OnPartnerAtExit()
+        public static void OnPartnerAtExit(BinaryReader r)
         {
+            string custom = "";
+            try
+            {
+                if (r.BaseStream.Position < r.BaseStream.Length)
+                    custom = r.ReadString();
+            }
+            catch (System.Exception) { }
             Toast.Show((session.PeerName ?? "Your partner") + " is waiting for you at the exit.", 6f);
+
+            // We're a ghost: the elevator only comes for a living player, so we can't take the exit ourselves, and the
+            // player waiting at theirs can't move any more (their screen is already black). Nobody could go on. Take
+            // their exit, as the host, so everyone does.
+            GameManager gm = GameManager.HasInstance ? GameManager.Instance : null;
+            PlayerController me = gm != null ? gm.PrimaryPlayer : null;
+            if (me == null || !me.IsGhost || gm.IsFoyer || gm.IsLoadingLevel || DeathPageUp() || DuelSync.InPrivatePast)
+                return;
+            RemotePlayerState who = session.From >= 0 && session.From < session.Players.Length ? session.Players[session.From] : null;
+            if (who == null || !who.HasPlayer || who.IsDead || who.Scene != CurrentLevelKey())
+                return;
+            if (custom.Length > 0 && gm.GetLevelDefinitionFromName(custom) == null)
+                return; // not a level this game knows
+            Plugin.Log.LogInfo("We're a ghost and " + who.Name + " is at the exit: taking it for the team.");
+            if (gm.IsPaused)
+                gm.ForceUnpause();
+            if (Pixelator.Instance != null)
+                Pixelator.Instance.FadeToBlack(LoadDelay, false, 0f);
+            if (custom.Length > 0)
+                gm.DelayedLoadCustomLevel(LoadDelay, custom);
+            else
+                gm.DelayedLoadNextLevel(LoadDelay);
         }
 
         // Joiner: the floor we're on (or loading), to skip loading the same floor twice.
@@ -304,6 +336,31 @@ namespace GungeonOnline
             return IsConnected && !session.Link.IsHost;
         }
 
+        // Hosting, with or without guests right now. The host keeps track of its run (seed, current floor) the whole
+        // time: someone who joins or comes back later needs it. (It used to be tracked only while a guest was
+        // connected, so a late joiner got no floor, or a returning one the floor the host had left.)
+        private static bool IsHosting()
+        {
+            return session != null && session.Link != null && session.Link.IsHost;
+        }
+
+        // The session is over (we left, or lost the host for good): forget what we knew of the host's run, or the
+        // next session starts out believing its host is on that old floor.
+        public static void OnSessionEnded()
+        {
+            hostLevel = null;
+            ourLevel = null;
+            missedLoad = null;
+            WaitingToJoin = false;
+            WaitingForHost = false;
+            pendingFoyerReturn = false;
+            pendingEndRun = false;
+            waitingForRunStart = false;
+            followLoad = false;
+            restartAskedUntil = -1f;
+            // waitingAtExit stays: UpdateExitWait lets a held player go on alone.
+        }
+
         // Joiner: the host reports a player standing in the Breach.
         private static bool PartnerInBreach
         {
@@ -388,7 +445,7 @@ namespace GungeonOnline
                 ourLevel = loading;
                 return true;
             }
-            if (!IsConnectedHost())
+            if (!IsHosting())
                 return true;
 
             // A fresh seed for every new run (Quick Restart would otherwise replay the same dungeon).
@@ -433,7 +490,7 @@ namespace GungeonOnline
             }
             departedFoyer = false;
             continuingSavedRun = false;
-            if (!IsConnectedHost())
+            if (!IsHosting())
                 return true;
             if (startingRun || __instance.CurrentRunSeed == 0)
                 __instance.InitializeForRunWithSeed(Random.Range(1, 1000000000));
@@ -496,6 +553,13 @@ namespace GungeonOnline
         private static void RestartOntoHostRun()
         {
             GameManager gm = GameManager.Instance;
+            missedLoad = null;
+            missedStartsRun = false;
+            // A held exit belongs to the old run: left set, it kept saying "waiting for the host" in the new one.
+            waitingAtExit = false;
+            waitingForRunStart = false;
+            waitingCustom = null;
+            followLoad = false;
             WaitingForHost = false;
             WaitingToJoin = false;
             pendingFoyerReturn = false;
@@ -516,10 +580,10 @@ namespace GungeonOnline
         private static void BeforeReturnToFoyer()
         {
             insideFoyerReturn = true;
-            if (IsConnectedHost())
+            if (IsHosting())
             {
                 hostLevel = null;
-                session.SendReliable(MsgType.ReturnToFoyer, null);
+                session.SendReliable(MsgType.ReturnToFoyer, null); // goes nowhere while nobody is connected
             }
         }
 
@@ -537,9 +601,10 @@ namespace GungeonOnline
         private static void BeforeLoadCharacterSelect(GameManager __instance)
         {
             insideFoyerReturn = true;
+            if (IsHosting())
+                hostLevel = null;
             if (IsConnectedHost())
             {
-                hostLevel = null;
                 if (!__instance.IsFoyer)
                 {
                     Plugin.Log.LogInfo("Host ended the run; ending the partner's run too.");
@@ -574,7 +639,79 @@ namespace GungeonOnline
             }
 
             UpdateExitWait();
+            FollowMissedLoad();
             FollowToFoyerWhenReady();
+        }
+
+        // The host loaded a floor while we were in the middle of a load of our own (joining through the elevator, a
+        // floor reload, a slow PC). It couldn't be followed then; follow it as soon as our load is done. (It used to
+        // be picked up only by a player waiting at an exit; anyone else stayed a floor behind until the host's
+        // next exit.)
+        private static void FollowMissedLoad()
+        {
+            if (missedLoad == null)
+                return;
+            if (waitingAtExit && !missedStartsRun)
+                return; // UpdateExitWait deals with that one
+            GameManager gm = GameManager.HasInstance ? GameManager.Instance : null;
+            if (gm == null)
+                return;
+            if (gm.IsLoadingLevel)
+            {
+                // Safety net for a "loading" mark that never clears: after 90 s do what we used to do at once.
+                if (missedStartsRun && Time.realtimeSinceStartup - missedLoadAt > 90f && IsConnectedJoiner()
+                    && hostLevel != null && hostLevel.Seed == missedLoad.Seed)
+                {
+                    Plugin.Log.LogWarning("Still 'loading' 90 s after the host started a new run; restarting onto it anyway.");
+                    RestartOntoHostRun(); // clears missedLoad
+                }
+                return;
+            }
+            if (!IsConnectedJoiner() || gm.IsFoyer)
+            {
+                missedLoad = null;
+                return;
+            }
+            if (gm.PrimaryPlayer == null || DuelSync.InPrivatePast)
+                return;
+            if (missedStartsRun)
+            {
+                LevelInfo run = missedLoad;
+                missedLoad = null;
+                missedStartsRun = false;
+                // Seeds are per run. The host may be a floor further by now; the restart joins wherever it is now.
+                if (hostLevel == null || hostLevel.Seed != run.Seed)
+                    return; // that run is over (the Breach, or a newer run, which sent its own message)
+                if (ourLevel != null && ourLevel.Seed == run.Seed)
+                {
+                    // Our own load already landed in that run.
+                    bool sameFloor = ourLevel.Index == hostLevel.Index && ourLevel.Custom == hostLevel.Custom;
+                    if (!sameFloor && !OnDeathScreen)
+                        FollowLevel(gm, hostLevel.Seed, hostLevel.Index, hostLevel.Custom);
+                    return;
+                }
+                if (OnDeathScreen)
+                {
+                    WaitingToJoin = true;
+                    return;
+                }
+                Plugin.Log.LogInfo("Our load is done and the host started a new run meanwhile: restarting onto it now.");
+                RestartOntoHostRun();
+                return;
+            }
+            if (OnDeathScreen)
+                return;
+            LevelInfo m = missedLoad;
+            missedLoad = null;
+            // Only if that is still where the host is (it's the very same record): the host may have gone on again,
+            // back to the Breach, or started a new run since.
+            if (!ReferenceEquals(m, hostLevel))
+                return;
+            bool sameAsOurs = ourLevel != null && ourLevel.Seed == m.Seed && ourLevel.Index == m.Index && ourLevel.Custom == m.Custom;
+            if (sameAsOurs || Time.realtimeSinceStartup - missedLoadAt > 120f)
+                return;
+            Plugin.Log.LogInfo("Our load is done and the host went on to another floor meanwhile: following them now.");
+            FollowLevel(gm, m.Seed, m.Index, m.Custom);
         }
 
         private static void UpdateExitWait()
@@ -592,7 +729,8 @@ namespace GungeonOnline
                 // The host is gone: don't stay stuck, load where our exit leads.
                 Plugin.Log.LogInfo("No host to wait for anymore: taking our exit.");
                 waitingAtExit = false;
-                bypassWait = true;
+                // No "skip the next hold" mark is needed: without a host this load isn't held at all. (There used to
+                // be one; nothing used it up, so it let a later exit in the next session go ahead of that host.)
                 if (!string.IsNullOrEmpty(waitingCustom))
                     gm.DelayedLoadCustomLevel(LoadDelay, waitingCustom);
                 else
@@ -601,7 +739,7 @@ namespace GungeonOnline
             }
             // We both took the exit at the same moment: the host's load came while our elevator was starting, so it
             // couldn't be followed then - and we'd wait for it forever. Follow it now.
-            if (missedLoad != null && !gm.IsLoadingLevel && !waitingForRunStart)
+            if (missedLoad != null && !missedStartsRun && !gm.IsLoadingLevel && !waitingForRunStart)
             {
                 LevelInfo m = missedLoad;
                 missedLoad = null;
@@ -628,10 +766,11 @@ namespace GungeonOnline
         {
             // A new run: send our latest save progress first (reliable messages arrive in order), so the
             // joiner builds the floors from the same progress as we do.
-            if (startingRun && follow)
+            if (startingRun && follow && IsConnected)
                 SaveSync.SendProgress(true);
             // Loop The Gungeon: the loop number must arrive before the floor it belongs to.
-            LoopSync.SendState(false);
+            if (IsConnected)
+                LoopSync.SendState(false);
             hostLevel = new LevelInfo();
             hostLevel.Seed = seed;
             hostLevel.Index = levelIndex;
@@ -671,7 +810,11 @@ namespace GungeonOnline
                 Plugin.Log.LogWarning("Host started a level, but you haven't picked a character yet. Take the elevator to join them.");
                 return;
             }
-            if (startingRun && !gm.IsFoyer && !waitingAtExit)
+            // Held at the Breach elevator for the run to start: a plain follow is right (fresh character). Held at an
+            // exit in the middle of the old run is not: that needs the restart like everyone else (it used to follow
+            // with a plain load and keep the old run's gear).
+            bool heldForRunStart = waitingAtExit && waitingForRunStart;
+            if (startingRun && !gm.IsFoyer && !heldForRunStart)
             {
                 // The host started a new run while we're still in the old one.
                 if (WaitingForHost)
@@ -687,7 +830,17 @@ namespace GungeonOnline
                     WaitingToJoin = true;
                     return;
                 }
-                // Alive or a ghost: come along.
+                if (gm.IsLoadingLevel)
+                {
+                    // A restart on top of a running load is two loads at once (that hangs the game): restart once
+                    // ours is done (FollowMissedLoad).
+                    Plugin.Log.LogWarning("Host started a new run while we were still loading; restarting onto it once our load is done.");
+                    missedLoad = hostLevel;
+                    missedLoadAt = Time.realtimeSinceStartup;
+                    missedStartsRun = true;
+                    return;
+                }
+                // Alive, a ghost, or held at an exit: come along.
                 RestartOntoHostRun();
                 return;
             }
@@ -700,6 +853,7 @@ namespace GungeonOnline
                 Plugin.Log.LogWarning("Host loaded a level while we were still loading; following it once we can.");
                 missedLoad = hostLevel;
                 missedLoadAt = Time.realtimeSinceStartup;
+                missedStartsRun = false;
                 return;
             }
             FollowLevel(gm, seed, levelIndex, customLevel);
@@ -708,9 +862,13 @@ namespace GungeonOnline
         // A host load that arrived while we were loading ourselves (both took the exit at the same moment).
         private static LevelInfo missedLoad;
         private static float missedLoadAt;
+        // The missed load started a new run: follow it with a restart, not a plain load (only while missedLoad is set).
+        private static bool missedStartsRun;
 
         private static void FollowLevel(GameManager gm, int seed, int levelIndex, string customLevel)
         {
+            if (gm.IsPaused)
+                gm.ForceUnpause(); // the load's short delay runs on game time: paused, it would never start
             missedLoad = null;
             pendingFoyerReturn = false;
             pendingEndRun = false;
@@ -791,6 +949,7 @@ namespace GungeonOnline
         {
             hostLevel = null;
             ourLevel = null;
+            missedLoad = null;
             if (!GameManager.HasInstance || GameManager.Instance.IsFoyer || OnDeathScreen || DuelSync.InPrivatePast)
                 return;
             Plugin.Log.LogInfo("Host returned to the Breach; following.");
@@ -802,6 +961,7 @@ namespace GungeonOnline
         {
             hostLevel = null;
             ourLevel = null;
+            missedLoad = null;
             if (!GameManager.HasInstance || GameManager.Instance.IsFoyer || DuelSync.InPrivatePast)
                 return;
             if (!WaitingForHost && (OnDeathScreen || DeathPageUp()))

@@ -234,8 +234,9 @@ namespace GungeonOnline
             GameManager g0 = GameManager.HasInstance ? GameManager.Instance : null;
             if (g0 != null && !g0.IsFoyer)
                 breachVisitHandled = false;
-            else if (g0 != null && Foyer.Instance != null && Object.FindObjectOfType<CoopPastController>() == null && !breachVisitHandled && rejoinCharacter == null && myRunCharacter != null
-                && LevelSync.HostInRun && LevelSync.HostRunSeed == myRunSeed)
+            else if (g0 != null && Foyer.Instance != null && !breachVisitHandled && rejoinCharacter == null && myRunCharacter != null
+                && LevelSync.HostInRun && LevelSync.HostRunSeed == myRunSeed
+                && Object.FindObjectOfType<CoopPastController>() == null) // last: a scene search, only when all else holds
             {
                 breachVisitHandled = true;
                 rejoinCharacter = myRunCharacter;

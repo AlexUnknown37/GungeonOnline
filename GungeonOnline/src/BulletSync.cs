@@ -377,7 +377,10 @@ namespace GungeonOnline
         {
             bool remote = remoteProjectiles.Contains(__instance);
             EnemySync.RemoteBulletHitting = remote;
-            EnemySync.LocalBulletHitting = !remote;
+            // An enemy's own bullet that hits an enemy (a charmed one's) flies in every game: it is not "our hit" to
+            // report, or its damage lands once per player. (Companions' bullets are their player's.)
+            AIActor enemyOwner = __instance.Owner as AIActor;
+            EnemySync.LocalBulletHitting = !remote && (enemyOwner == null || enemyOwner.CompanionOwner != null);
         }
 
         // Safety net for any gun: without PvP, another player's copied bullet never hurts a player here, however it
@@ -588,11 +591,42 @@ namespace GungeonOnline
             if (prefab == null)
                 return;
 
+            // Start the copy where the real bullet is by now (it was fired one network delay ago): otherwise it flies
+            // that much behind, and can visibly miss an enemy the real one hit. Never past a wall or an enemy on the
+            // way (it should still hit those itself), only plain straight bullets, and at most a short way.
+            Vector2 at = pos;
+            Projectile proto = prefab.GetComponent<Projectile>();
+            byte motionKind = r.ReadByte(); // a look ahead: bullets that circle or spiral are placed by their motion
+            r.BaseStream.Position -= 1;
+            if (proto != null && proto.GetType() == typeof(Projectile) && motionKind == BulletMotion.None
+                && Protocol.Finite(speed) && speed > 0.5f && PhysicsEngine.HasInstance)
+            {
+                float rad0 = angle * Mathf.Deg2Rad;
+                Vector2 dir0 = new Vector2(Mathf.Cos(rad0), Mathf.Sin(rad0));
+                float ahead = Mathf.Min(speed * Mathf.Min(EnemySync.OneWayDelay(session.From), 0.15f), 3f);
+                if (Protocol.Finite(range) && range > 0f)
+                    ahead = Mathf.Min(ahead, range * 0.5f);
+                if (ahead > 0.05f)
+                {
+                    RaycastResult hit;
+                    int mask = CollisionMask.LayerToMask(CollisionLayer.EnemyHitBox, CollisionLayer.HighObstacle,
+                        CollisionLayer.BulletBlocker, CollisionLayer.BulletBreakable);
+                    if (PhysicsEngine.Instance.Raycast(pos, dir0, ahead, out hit, true, true, mask))
+                        ahead = Mathf.Max(0f, hit.Distance - 0.3f);
+                    RaycastResult.Pool.Free(ref hit);
+                }
+                if (ahead > 0.05f)
+                {
+                    at = pos + dir0 * ahead;
+                    range -= ahead; // it has already flown this far
+                }
+            }
+
             GameObject spawned;
             spawningRemote = true;
             try
             {
-                spawned = SpawnManager.SpawnProjectile(prefab, pos, Quaternion.Euler(0f, 0f, angle), true);
+                spawned = SpawnManager.SpawnProjectile(prefab, at, Quaternion.Euler(0f, 0f, angle), true);
             }
             finally
             {
@@ -602,8 +636,19 @@ namespace GungeonOnline
             if (p == null)
                 return;
 
+            // Copies are destroyed when they end (they're not pooled), so drop the ones that are gone now and then.
+            if (remoteProjectiles.Count > 256 && Time.realtimeSinceStartup >= nextCopyPruneAt)
+            {
+                nextCopyPruneAt = Time.realtimeSinceStartup + 2f;
+                remoteProjectiles.RemoveWhere(IsGone);
+                BulletMotion.Prune();
+            }
             remoteProjectiles.Add(p);
             theirs[TheirKey(netId)] = p;
+            // The shooter's game decides what a hit turns an enemy into; a copy rolling its own dice for it would
+            // change the enemy in this game only.
+            p.CanTransmogrify = false;
+            NoOwnEffects(p);
 
             // Pooled projectiles keep their last owner; make sure this one belongs to nobody here,
             // so it doesn't trigger our items or count as our kill.
@@ -690,11 +735,38 @@ namespace GungeonOnline
 
         // A bullet another player's copied item made here (a thrown item that flies like a bullet): treated like their
         // copied shots (it hurts no player without PvP; its damage to enemies comes from their game).
+        private static float nextCopyPruneAt;
+
+        // The shooter's game rolls a bullet's own poison / fire / freeze / charm chances and tells us what landed
+        // (EffectSync). A copy rolling them as well doubled the chance and could put an effect on an enemy in this
+        // game only. (Not for exploding bullets: their explosion takes its fire / ice / poison kind from these marks.)
+        private static void NoOwnEffects(Projectile p)
+        {
+            if (p.GetComponent<ExplosiveModifier>() != null)
+                return;
+            p.AppliesPoison = false;
+            p.AppliesSpeedModifier = false;
+            p.AppliesCharm = false;
+            p.AppliesFreeze = false;
+            p.AppliesCheese = false;
+            p.AppliesBleed = false;
+            p.AppliesFire = false;
+            if (p.statusEffectsToApply != null && p.statusEffectsToApply.Count > 0)
+                p.statusEffectsToApply = new List<GameActorEffect>();
+        }
+
+        private static bool IsGone(Projectile p)
+        {
+            return p == null;
+        }
+
         public static void TreatAsCopy(Projectile p)
         {
             if (p == null || session == null)
                 return;
             remoteProjectiles.Add(p);
+            p.CanTransmogrify = false;
+            NoOwnEffects(p);
             ownerField.SetValue(p, null);
             shooterField.SetValue(p, null);
             p.collidesWithPlayer = session.PvpEnabled || DuelSync.Active;

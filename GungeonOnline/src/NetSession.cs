@@ -272,6 +272,8 @@ namespace GungeonOnline
                 else
                     MultiplayerMenu.EnterBreachFromTitle(); // accepted an invite on the title screen
             };
+            // A friend's invite accepted while the game runs goes the same way as the menu's Join button.
+            lobby.OnJoinRequest = JoinSteamLobby;
             Steam = new SteamLink(lobby);
         }
 
@@ -283,8 +285,16 @@ namespace GungeonOnline
 
         public void JoinSteamLobby(CSteamID lobby)
         {
-            if (Steam != null)
-                Steam.Lobby.Join(lobby);
+            if (Steam == null)
+                return;
+            // End whatever session we're in first (hosting on Steam included). Joining used to leave only the Steam
+            // lobby: our slot stayed "host", so every packet from the new host looked like our own and was dropped,
+            // and the menu said "Connecting..." forever.
+            if (Link == Steam && Steam.Lobby.InLobby && Steam.Lobby.LobbyId == lobby)
+                return; // already in that lobby
+            if (Link != null)
+                Leave();
+            Steam.Lobby.Join(lobby);
         }
 
         public bool HostLan(int port)
@@ -344,7 +354,12 @@ namespace GungeonOnline
             Discovery.Poll();
 
             if (Status != State.Connecting && Status != State.Connected)
+            {
+                // Keep the clock current while idle: otherwise the first frame of a new connection looks like one
+                // long freeze, which pushed the "no answer" timeout back by however long the game had been open.
+                lastUpdateAt = Time.realtimeSinceStartup;
                 return;
+            }
 
             float now = Time.realtimeSinceStartup;
 
@@ -365,6 +380,15 @@ namespace GungeonOnline
                 {
                     if (Players[i].Connected && now - Players[i].LastHeard > Timeout)
                         Disconnect(i, "timed out");
+                    else if (!Players[i].Connected && strangerSince[i] > 0f && now - strangerSince[i] > StrangerTimeout)
+                    {
+                        // The link gave this slot to someone who never (validly) said hello: free it, or they hold
+                        // one of the three guest slots for good. A real player just gets a slot again and is asked
+                        // to say hello.
+                        strangerSince[i] = 0f;
+                        Plugin.Log.LogInfo("Player slot " + (i + 1) + " was taken without a hello: freeing it.");
+                        Link.DropPeer(i);
+                    }
                 }
                 if (Link == null)
                     return;
@@ -504,8 +528,12 @@ namespace GungeonOnline
             {
                 // A guest can only speak for itself: its slot is the one the link knows it by.
                 from = linkSlot;
+                if (from <= 0 || from >= Players.Length)
+                    return;
                 data[offset + 1] = (byte)linkSlot;
                 Players[from].LastHeard = arrived;
+                if (!Players[from].Connected && strangerSince[from] <= 0f)
+                    strangerSince[from] = arrived;
                 // Pass it on to the other guests (only once that guest has said hello). Orders only the host gives
                 // are never passed on: a guest could otherwise load levels or end runs for everyone.
                 if (Players[from].Connected && !HostOnly(type) && !HostAuthority(type))
@@ -566,6 +594,18 @@ namespace GungeonOnline
         }
 
         private readonly float[] helloAskedAt = new float[Protocol.MaxPlayers];
+        // Host: when a slot's first packet arrived from someone who hasn't said hello yet (0 = nobody waiting).
+        private readonly float[] strangerSince = new float[Protocol.MaxPlayers];
+        private const float StrangerTimeout = 10f;
+        private const int MaxNameLength = 32;
+
+        // Names come from the other game: keep them short enough for the party list and toasts.
+        private static string CleanName(string name)
+        {
+            if (name == null)
+                return "";
+            return name.Length > MaxNameLength ? name.Substring(0, MaxNameLength) : name;
+        }
 
         // While set, Send* go only to this slot (the host greeting one newcomer). -1 = everyone.
         private int onlyTo = Transport.Everyone;
@@ -576,22 +616,31 @@ namespace GungeonOnline
                 switch (type)
                 {
                     case MsgType.Hello:
+                        // The version comes first and is checked before anything else is read: the rest of a
+                        // hello may be laid out differently in another version.
                         int version = r.ReadInt32();
-                        string name = r.ReadString();
+                        if (version != Protocol.Version)
+                        {
+                            string theirName = "A player";
+                            try { theirName = CleanName(r.ReadString()); } catch (Exception) { }
+                            Plugin.Log.LogError(theirName + " runs protocol " + version + ", we run " + Protocol.Version + ".");
+                            Toast.Show(theirName + " has a different Gungeon Online version. Everyone needs the same one.", 6f);
+                            // Host: answer once so the joiner learns why right away instead of waiting for a timeout.
+                            if (Link.IsHost)
+                                SendHello(from);
+                            Disconnect(from, "version mismatch");
+                            return;
+                        }
+                        string name = CleanName(r.ReadString());
                         byte yourSlot = r.ReadByte();
                         bool pleaseIntroduce = r.ReadBoolean();
                         string key = r.ReadString();
                         if (key.Length == 0)
                             key = name;
-                        if (version != Protocol.Version)
-                        {
-                            Plugin.Log.LogError(name + " runs protocol " + version + ", we run " + Protocol.Version + ".");
-                            Disconnect(from, "version mismatch");
-                            return;
-                        }
                         if (Link.IsHost)
                         {
                             bool isNew = !Players[from].Connected;
+                            strangerSince[from] = 0f;
                             StandIn.OnHello(from, key);
                             Players[from].Name = name;
                             Players[from].Key = key;
@@ -801,6 +850,9 @@ namespace GungeonOnline
                     case MsgType.EnemyEffect:
                         EffectSync.OnEnemyEffect(r);
                         break;
+                    case MsgType.Transmogrify:
+                        EnemySync.OnTransmogrify(r);
+                        break;
                     case MsgType.KeyItem:
                         KeyItemSync.OnKeyItem(r);
                         break;
@@ -874,7 +926,7 @@ namespace GungeonOnline
 
                     case MsgType.AtExit:
                         if (Link.IsHost)
-                            LevelSync.OnPartnerAtExit();
+                            LevelSync.OnPartnerAtExit(r);
                         break;
 
                     case MsgType.ModSettings:
@@ -976,7 +1028,7 @@ namespace GungeonOnline
             for (int i = 0; i < count; i++)
             {
                 int slot = r.ReadByte();
-                string name = r.ReadString();
+                string name = CleanName(r.ReadString());
                 if (slot >= Players.Length)
                     continue;
                 present[slot] = true;
@@ -1232,6 +1284,17 @@ namespace GungeonOnline
         private void ReadPlayerState(BinaryReader r, RemotePlayerState Remote)
         {
             float sentAt = r.ReadSingle();
+            if (float.IsNaN(sentAt) || float.IsInfinity(sentAt))
+                return; // would poison the motion smoothing (and the puppet's position) for good
+            // The clock in this slot's updates jumped: someone else speaks for the slot now (the host's stand-in took
+            // over or handed back; each game has its own clock) or the sender restarted. Without starting over, every
+            // update with the lower clock looked "older than the newest" and was thrown away until the next floor.
+            if (Remote.SentAt >= 0f && Mathf.Abs(sentAt - Remote.SentAt) > 5f)
+            {
+                Remote.SentAt = -1f;
+                Remote.Motion.Clear();
+                Remote.PetMotion.Clear();
+            }
             byte flags = r.ReadByte();
             int sceneCode = r.ReadInt32();
             bool hasPlayer = (flags & 1) != 0, slow = (flags & 2) != 0, clips = (flags & 4) != 0, visible = (flags & 8) != 0;
@@ -1357,6 +1420,8 @@ namespace GungeonOnline
         {
             // Don't leave a shared seed behind, or every later solo run would get the same dungeon.
             LevelSync.ResetSeed();
+            LevelSync.OnSessionEnded();
+            Array.Clear(strangerSince, 0, strangerSince.Length);
             foreach (RemotePlayerState p in Players)
                 p.Reset();
             RebuildRemotes();
@@ -1383,12 +1448,24 @@ namespace GungeonOnline
                 last.RootOffset = Players[slot].RootOffset;
                 last.IsDead = Players[slot].IsDead;
                 Players[slot].Reset();
+                strangerSince[slot] = 0f;
                 Link.DropPeer(slot);
                 RebuildRemotes();
                 if (!wasThere)
                     return;
                 Plugin.Log.LogWarning("Player " + (slot + 1) + " (" + name + ") disconnected: " + reason);
                 Toast.Show(name + " left the game.", 4f);
+                // If they had the pause menu open, nobody is going to send the "unpaused" for them: do it here, in
+                // their name. (With a stand-in taking their slot, the other guests otherwise stayed frozen.)
+                Protocol.SendAs = slot;
+                try
+                {
+                    SendReliable(MsgType.Paused, delegate (BinaryWriter w) { w.Write(false); });
+                }
+                finally
+                {
+                    Protocol.SendAs = -1;
+                }
                 StandIn.OnGuestLeft(slot, name, key, last);
                 SendRoster();
                 // The host keeps its lobby / port open so friends can come (back). Mid-run the seed stays, so a

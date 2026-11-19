@@ -26,8 +26,10 @@ namespace GungeonOnline
             if (session == null)
                 return;
             PlayerController me = GameManager.HasInstance ? GameManager.Instance.PrimaryPlayer : null;
-            Minimap map = Minimap.Instance;
-            bool canShow = session.Status == NetSession.State.Connected && me != null && map != null && !GameManager.Instance.IsLoadingLevel;
+            // Only ask for the minimap when it's needed: without one (title screen, offline) asking searches the scene.
+            bool wanted = session.Status == NetSession.State.Connected && me != null && !GameManager.Instance.IsLoadingLevel;
+            Minimap map = wanted ? Minimap.Instance : null;
+            bool canShow = wanted && map != null;
             string level = canShow ? LevelSync.CurrentLevelKey() : "";
             for (int i = 0; i < markers.Length; i++)
             {

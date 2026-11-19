@@ -45,6 +45,16 @@ namespace GungeonOnline
         {
             bool turbo = r.ReadBoolean(), rainbow = r.ReadBoolean();
             int challenge = r.ReadByte();
+            if (!System.Enum.IsDefined(typeof(ChallengeModeType), (ChallengeModeType)challenge))
+                challenge = 0;
+            // Our own choices come back when the session ends (Turbo and Rainbow are part of the save file).
+            if (!ownSaved && GameStatsManager.HasInstance)
+            {
+                ownSaved = true;
+                ownTurbo = Turbo;
+                ownRainbow = Rainbow;
+                ownChallenge = (int)ChallengeManager.ChallengeModeType;
+            }
             if (!haveHost || turbo != hostTurbo || rainbow != hostRainbow || challenge != hostChallenge)
             {
                 string modes = Describe(turbo, rainbow, challenge);
@@ -65,6 +75,8 @@ namespace GungeonOnline
             {
                 haveHost = false;
                 lastSent = "";
+                if (session == null || session.Link == null)
+                    RestoreOwn(); // not while a lost Steam connection is being retried
                 return;
             }
             if (Time.realtimeSinceStartup < nextCheckAt || !GameManager.HasInstance || GameManager.Instance.IsLoadingLevel)
@@ -80,6 +92,24 @@ namespace GungeonOnline
             {
                 Apply();
             }
+        }
+
+        private static bool ownSaved, ownTurbo, ownRainbow;
+        private static int ownChallenge;
+
+        // Guest: the session is over (or the game is closing): put our own game modes back.
+        public static void RestoreOwn()
+        {
+            if (!ownSaved)
+                return;
+            ownSaved = false;
+            if (GameStatsManager.HasInstance)
+            {
+                GameStatsManager.Instance.isTurboMode = ownTurbo;
+                GameStatsManager.Instance.rainbowRunToggled = ownRainbow;
+            }
+            ChallengeManager.ChallengeModeType = (ChallengeModeType)ownChallenge;
+            Plugin.Log.LogInfo("Game modes are back to our own: " + Describe(ownTurbo, ownRainbow, ownChallenge) + ".");
         }
 
         private static void Apply()

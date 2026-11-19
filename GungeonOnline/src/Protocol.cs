@@ -63,14 +63,15 @@ namespace GungeonOnline
         Motion = 53,      // our flying bullets that started circling us or spiralling: the copies do the same
         Companions = 52,  // our extra companions (after the first): kind, animation frame, facing, position
         LoopStart = 51,   // host -> guests: our loop's time tube just started (the loop number it leads to)
-        AttackStart = 50, // an enemy in the room we lead started an attack: which one, at whom, from where, dice seed
+        AttackStart = 50, // an enemy in the room we lead started an attack: which one, at whom (and where we see them), from where, dice seed
+        Transmogrify = 58, // an enemy was turned into another kind (a chicken...) in our game: the others do the same
         Progress = 28,   // host -> joiner: one part of the host's save progress (floors are built from it)
     }
 
     public static class Protocol
     {
         // Bump this whenever the packet format changes, so old and new versions refuse to talk.
-        public const int Version = 49;
+        public const int Version = 50;
         public const int Channel = 0;
         public const int MaxPlayers = 4;
         public const byte NoSlot = 255;   // a guest before the host has given it a slot
@@ -105,6 +106,18 @@ namespace GungeonOnline
         public static Vector2 ReadQ(BinaryReader r)
         {
             return new Vector2(DQ(r.ReadInt16()), DQ(r.ReadInt16()));
+        }
+
+        // Numbers from another game that end up in positions, speeds or health must be real numbers: one NaN there
+        // spreads (a NaN health can never reach zero, a NaN position breaks the object for good).
+        public static bool Finite(float v)
+        {
+            return !float.IsNaN(v) && !float.IsInfinity(v);
+        }
+
+        public static bool Finite(Vector2 v)
+        {
+            return Finite(v.x) && Finite(v.y);
         }
 
         // A short code for a text that's the same in every game (string.GetHashCode isn't promised to be).

@@ -50,7 +50,8 @@ All of it is experimental. See `MODLOG.md` for the detailed (and honest) develop
 
 The mod is plain C# 5 compiled with the C# compiler that ships with Windows (no SDK needed).
 `GungeonOnline/build.ps1` builds `GungeonOnline.dll` and a Thunderstore-style zip in `GungeonOnline/dist/`.
-It currently expects the game and a BepInEx copy at the paths at the top of the script — adjust them for your machine.
+It finds the game through Steam's library list and BepInEx in a Gale profile (see `GungeonOnline/paths.ps1`); if it can't, set the `GUNGEON_MANAGED` and `GUNGEON_BEPINEX_CORE` environment variables.
+`GungeonOnline/check.ps1` only compiles, and `GungeonOnline/tests/run-tests.ps1` runs the LAN delivery tests without the game.
 
 ## Credits
 
