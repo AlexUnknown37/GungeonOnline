@@ -1,7 +1,7 @@
 # Gungeon Online — engineering audit and fixes (2026-11-10)
 
 Reviewed commit: `bcb228428121e28721bce74d0b5f35fce03abcf7` (`main`, version 0.161.0, protocol 49).
-Work branch: `audit/fable-review` (local only; nothing pushed); the commit list is at the end of this file.
+Work branch: `audit/fable-review` (offered as one pull request); the commit list is at the end of this file.
 **Since 19 November the branch is protocol 50** (three changes; next section). Up to `f6bd19d` it is protocol 49.
 
 This file is the audit ledger and the handoff report in one. Every claim below is labelled with how it was
@@ -11,6 +11,55 @@ section; where it changes something said later in this file, it says so.
 
 **A successful build is not a multiplayer test.** What the two-copy sessions exercised is listed in the second
 pass. Everything else is still *implemented and awaiting in-game verification*.
+
+---
+
+## Start here (for the maintainer and their assistant)
+
+What this branch is: `main` at 0.161.0 (`bcb2284`) plus the audit's commits. The first 14 (up to `f6bd19d`) are fixes that change no
+message (protocol 49). The ones after that make it **protocol 50**. `ModVersion` is still 0.161.0: `build.ps1` bumps it
+on the next build.
+
+Read in this order:
+
+1. This section and the next ("Protocol 50"): what changed last, what is agreed but not built.
+2. "Second pass" and its tables: every fix (GO-xx) with how it was checked.
+3. Sections A to F: the first pass, the architecture map, the performance notes, the test matrix.
+
+To check the branch without the game: `GungeonOnline\check.ps1` (compiles only, exit code 0 = fine) and
+`GungeonOnline\tests\run-tests.ps1` (LAN delivery tests, ends with `ALL PASS`). To test with the game on one PC:
+`tools\audit-lan\README.md`.
+
+Where the protocol 50 code is:
+
+| Change | File | Look for |
+|---|---|---|
+| numbers for enemies made in play | `EnemySync.cs` | "Numbers for enemies made during play": `SpawnedId`, `PushSpawnParent` / `PopSpawnParent`, the `AIActor.Spawn` prefixes, `AfterRegisterEnemy` |
+| the aim point | `AttackSync.cs` `Send` / `OnAttackStart`; `TargetSync.cs` | "The leader's aim point": `AimAt`, `ApplyOverride`, `ViewOf` |
+| homing rockets | `TargetSync.cs` | "Homing rockets": `AfterRocketStart`, `RemoteAim` |
+| transmogrify | `EnemySync.cs`, `NetSession.cs` (dispatch), `Protocol.cs` (`MsgType.Transmogrify = 58`) | "Transmogrify": `BeforeTransmogrify`, `OnTransmogrify`, `ApplyTransmog`, `FlushPendingTransmogs` |
+
+Things a change in this area must keep true:
+
+- An enemy number is an `int` that may be negative. Nothing may assume `id / 1000` is a room. Placed enemies:
+  room x 1000 + order. Made in play: `int.MinValue | hash`.
+- Whoever calls `AIActor.Spawn` for an enemy should have pushed the enemy that makes it
+  (`EnemySync.PushSpawnParent`), or the new enemy is numbered as "nobody's": by room, kind and count alone. That
+  still matches between games as long as both make the same enemies of that kind in that room. Spawners not
+  given a maker yet: `BlobulordDeathController`, `CorpseSpawnController`, `BashelliskHeadController`, bullet
+  scripts that spawn (`FusebombBots1`, the Mine Flayer's), `SpawningProjectile`, items.
+- A message that names an enemy carries its kind too, and the receiver ignores it when the kind differs. Keep that
+  for new messages (`Transmogrify` does).
+- A message from another game must never run inside a boss intro if it removes or replaces an enemy (see GO-48).
+- Guests' messages are passed on by the host automatically unless listed in `NetSession.HostOnly` /
+  `HostAuthority`; a new message type needs a `case` in the dispatch `switch` and nothing else.
+- C# 5 only (the compiler that ships with Windows): no `?.`, no `$""`, no `out var`, no expression bodies.
+
+Suggested order for what is left (details in the tables below): S-2 and P-11 (small, no message change), then
+S-4, P-8 and P-9 while the version is already 50 and unreleased, then D-5 and the D-4 switch, then S-5. After
+that the human play-test: the checklist is in section D, plus one entry each for GO-46, GO-47 and GO-48
+(summoner and blob rooms; an aimed boss pattern watched from both screens; a Hexagun or Witch Pistol; a rocket
+enemy that fires `RobotechProjectile` rockets, which nobody has checked in game).
 
 ---
 
