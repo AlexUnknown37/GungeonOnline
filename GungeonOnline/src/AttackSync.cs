@@ -217,6 +217,10 @@ namespace GungeonOnline
             int level = LevelSync.CurrentLevelCode();
             Vector2 pos = a.specRigidbody != null ? a.specRigidbody.UnitCenter : (Vector2)a.transform.position;
             byte target = (byte)TargetSync.SlotOfTarget(a);
+            // Where our game sees that player right now: the others aim the copy at this very spot (their own view
+            // of the player is a network delay away from ours, so the same attack went a slightly different way).
+            SpeculativeRigidbody aimed = a.TargetRigidbody;
+            Vector2 aim = aimed != null ? aimed.GetUnitCenter(ColliderType.HitBox) : pos;
             session.SendReliable(MsgType.AttackStart, delegate (BinaryWriter w)
             {
                 w.Write(level);
@@ -226,6 +230,7 @@ namespace GungeonOnline
                 w.Write(target);
                 w.Write(pos.x); w.Write(pos.y);
                 w.Write(diceSeed);
+                Protocol.WriteQ(w, aim);
             });
         }
 
@@ -238,6 +243,7 @@ namespace GungeonOnline
             int target = r.ReadByte();
             Vector2 pos = new Vector2(r.ReadSingle(), r.ReadSingle());
             int diceSeed = r.ReadInt32();
+            Vector2 aim = Protocol.ReadQ(r);
             if (level != LevelSync.CurrentLevelCode())
                 return;
             AIActor a = EnemySync.ById(id);
@@ -266,6 +272,7 @@ namespace GungeonOnline
             // Same spot, same target as in the leader's game.
             EnemySync.PlaceAt(a, pos);
             TargetSync.Force(a, target);
+            TargetSync.AimAt(a, target, aim);
 
             try
             {
@@ -283,9 +290,11 @@ namespace GungeonOnline
                 UnityEngine.Random.InitState(diceSeed);
                 BehaviorResult result;
                 replaying = true;
+                EnemySync.PushSpawnParent(a); // what this attack summons is numbered as this enemy's
                 try { result = attack.Update(); }
                 finally
                 {
+                    EnemySync.PopSpawnParent();
                     replaying = false;
                     // Back to the game's own dice afterwards (also when the attack threw).
                     UnityEngine.Random.state = saved;
@@ -330,7 +339,8 @@ namespace GungeonOnline
         // - a gun enemy's shot and a teleport's landing spot roll from the attack's seed too, and the spread counter
         //   is set from it for that shot;
         // - the game's own dice are put back after each, so loot and effects are untouched.
-        // Aimed patterns still aim at where each game sees the target; that part cannot match.
+        // An aimed pattern starts aimed at the spot the leader's game saw the target at (sent with the attack, see
+        // TargetSync.AimAt); after that each game follows its own view of the target again.
         private class Dice
         {
             public int Seed, Roots, Shots;

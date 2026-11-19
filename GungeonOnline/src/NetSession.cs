@@ -850,6 +850,9 @@ namespace GungeonOnline
                     case MsgType.EnemyEffect:
                         EffectSync.OnEnemyEffect(r);
                         break;
+                    case MsgType.Transmogrify:
+                        EnemySync.OnTransmogrify(r);
+                        break;
                     case MsgType.KeyItem:
                         KeyItemSync.OnKeyItem(r);
                         break;

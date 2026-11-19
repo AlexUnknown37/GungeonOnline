@@ -9,6 +9,7 @@ namespace GungeonOnline
     // Enemy sync: shared health, deaths and positions.
     // Every game runs its own copy of every enemy (same seed = same rooms and enemies). Each enemy gets
     // the same ID in both games: its room's index in the dungeon plus the order it joined that room.
+    // (Enemies made during play are numbered by who made them instead: see "Numbers for enemies made during play".)
     // - Damage dealt to an enemy in one game is sent to the other, so health matches (bosses too).
     // - An enemy that dies in one game dies in the other; enemies already killed by the partner die as
     //   soon as they appear when you enter that room later.
@@ -66,6 +67,10 @@ namespace GungeonOnline
             idOf.Clear();
             byId.Clear();
             roomCounters.Clear();
+            spawnOrdinals.Clear();
+            spawnParents.Clear();
+            spawnDepth = 0;
+            pendingTransmogs.Clear();
             deadIds.Clear();
             killQueue.Clear();
             queuedAt.Clear();
@@ -98,10 +103,18 @@ namespace GungeonOnline
             int roomIndex = GameManager.Instance.Dungeon.data.rooms.IndexOf(__instance);
             if (roomIndex < 0)
                 return;
-            int counter;
-            roomCounters.TryGetValue(__instance, out counter);
-            roomCounters[__instance] = counter + 1;
-            int id = roomIndex * 1000 + counter;
+            int id;
+            if (spawnDepth > 0)
+            {
+                id = SpawnedId(roomIndex, enemy);
+            }
+            else
+            {
+                int counter;
+                roomCounters.TryGetValue(__instance, out counter);
+                roomCounters[__instance] = counter + 1;
+                id = roomIndex * 1000 + counter;
+            }
             idOf[enemy] = id;
             byId[id] = enemy;
             int deadKind;
@@ -109,6 +122,226 @@ namespace GungeonOnline
             {
                 killQueue.Add(enemy); // the partner already killed this one
                 queuedAt[enemy] = Time.realtimeSinceStartup;
+            }
+        }
+
+        // ---- Numbers for enemies made during play ----
+        // An enemy placed with its room gets room x 1000 + its place in the room's own order, the same in every
+        // game. Enemies made later by AIActor.Spawn (a summon, a blob's halves, what comes out of a dying enemy, a
+        // transmogrified chicken) used to take the next number in that order too - so one spawn that happened in
+        // one game only, or two parents dying in another order, gave every later enemy of the room a different
+        // number in each game. They now get a number worked out from what they are: the room, the enemy that made
+        // them, their kind, and which one of that kind from that parent. Such numbers are negative, so they can
+        // never meet a placed enemy's, and a spawn that only one game had moves nobody else's number.
+        private static int spawnDepth;
+        private static readonly List<AIActor> spawnParents = new List<AIActor>();
+        private static readonly Dictionary<int, int> spawnOrdinals = new Dictionary<int, int>();
+
+        // The enemy that is making other enemies right now (a summoner's attack, a dying blob...). Without one, a
+        // spawned enemy is numbered by room and kind alone.
+        public static void PushSpawnParent(AIActor parent)
+        {
+            spawnParents.Add(parent);
+        }
+
+        public static void PopSpawnParent()
+        {
+            if (spawnParents.Count > 0)
+                spawnParents.RemoveAt(spawnParents.Count - 1);
+        }
+
+        private static int Mix(int a, int b)
+        {
+            unchecked
+            {
+                uint h = ((uint)a * 0x9E3779B1u) ^ (uint)b;
+                h ^= h >> 15;
+                h *= 0x85EBCA77u;
+                h ^= h >> 13;
+                return (int)h;
+            }
+        }
+
+        private static int SpawnedId(int roomIndex, AIActor enemy)
+        {
+            int parentId = 0;
+            AIActor parent = spawnParents.Count > 0 ? spawnParents[spawnParents.Count - 1] : null;
+            if (parent != null && parent != enemy)
+                idOf.TryGetValue(parent, out parentId);
+            int key = Mix(Mix(roomIndex + 1, parentId), KindHash(enemy.EnemyGuid));
+            int ordinal;
+            spawnOrdinals.TryGetValue(key, out ordinal);
+            spawnOrdinals[key] = ordinal + 1;
+            int id = int.MinValue | (Mix(key, ordinal) & 0x7FFFFFFF);
+            // Two different enemies landing on one number is about a one in a billion chance per pair; step on then.
+            AIActor other;
+            for (int tries = 0; tries < 8 && byId.TryGetValue(id, out other) && other != null && other != enemy
+                && other.healthHaver != null && !other.healthHaver.IsDead; tries++)
+                id = int.MinValue | ((id + 1) & 0x7FFFFFFF);
+            // One line per enemy made during play: the two games' logs can be laid side by side.
+            Plugin.Log.LogInfo("Enemy made in play: " + enemy.name + " in room " + roomIndex + " is number " + id
+                + " (made by " + (parentId != 0 ? parentId.ToString() : "nobody") + ", its " + (ordinal + 1) + ". of that kind).");
+            return id;
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIActor), "Spawn", new System.Type[] { typeof(AIActor), typeof(IntVector2), typeof(RoomHandler), typeof(bool), typeof(AIActor.AwakenAnimationType), typeof(bool) })]
+        private static void BeforeSpawnCell() { spawnDepth++; }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(AIActor), "Spawn", new System.Type[] { typeof(AIActor), typeof(IntVector2), typeof(RoomHandler), typeof(bool), typeof(AIActor.AwakenAnimationType), typeof(bool) })]
+        private static System.Exception AfterSpawnCell(System.Exception __exception) { spawnDepth = Mathf.Max(0, spawnDepth - 1); return __exception; }
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIActor), "Spawn", new System.Type[] { typeof(AIActor), typeof(Vector2), typeof(RoomHandler), typeof(bool), typeof(AIActor.AwakenAnimationType), typeof(bool) })]
+        private static void BeforeSpawnPoint() { spawnDepth++; }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(AIActor), "Spawn", new System.Type[] { typeof(AIActor), typeof(Vector2), typeof(RoomHandler), typeof(bool), typeof(AIActor.AwakenAnimationType), typeof(bool) })]
+        private static System.Exception AfterSpawnPoint(System.Exception __exception) { spawnDepth = Mathf.Max(0, spawnDepth - 1); return __exception; }
+
+        // Who makes them: an enemy's behaviours (summoning, splitting into images), what an enemy leaves when it
+        // dies, and a transmogrify (the new animal counts as made by the enemy it replaces).
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(BehaviorSpeculator), "Update")]
+        private static void BeforeBehaviours(BehaviorSpeculator __instance) { PushSpawnParent(__instance.aiActor); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(BehaviorSpeculator), "Update")]
+        private static System.Exception AfterBehaviours(System.Exception __exception) { PopSpawnParent(); return __exception; }
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(SpawnEnemyOnDeath), "SpawnEnemies")]
+        private static void BeforeDeathSpawn(SpawnEnemyOnDeath __instance) { PushSpawnParent(__instance.aiActor); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(SpawnEnemyOnDeath), "SpawnEnemies")]
+        private static System.Exception AfterDeathSpawn(System.Exception __exception) { PopSpawnParent(); return __exception; }
+
+        // Enemies the room itself adds (challenge modes, other mods' extra enemies) are nobody's, whatever enemy's
+        // turn it happened to be when the room added them.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(RoomHandler), "AddSpecificEnemyToRoomProcedurally")]
+        private static void BeforeRoomAdds() { PushSpawnParent(null); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(RoomHandler), "AddSpecificEnemyToRoomProcedurally")]
+        private static System.Exception AfterRoomAdds(System.Exception __exception) { PopSpawnParent(); return __exception; }
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(RoomHandler), "MakeRoomMoreDifficult")]
+        private static void BeforeRoomHarder() { PushSpawnParent(null); }
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(RoomHandler), "MakeRoomMoreDifficult")]
+        private static System.Exception AfterRoomHarder(System.Exception __exception) { PopSpawnParent(); return __exception; }
+
+        // ---- Transmogrify ----
+        // A gun or item turns an enemy into another kind (a chicken, a snake, a weaker enemy). The old enemy is not
+        // killed but taken out of the game, so nothing was sent: it stayed a full enemy in every other game. The
+        // game it happens in now says which enemy became what, and the others do the same change. The new animal
+        // counts as made by the enemy it replaces, so it gets the same number everywhere (see above).
+        private static bool applyingTransmog;
+        public static int TransmogsSent, TransmogsCopied;
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(AIActor), "Transmogrify")]
+        private static void BeforeTransmogrify(AIActor __instance, AIActor __0, GameObject __1)
+        {
+            PushSpawnParent(__instance);
+            if (applyingTransmog || !Connected || __0 == null)
+                return;
+            int id;
+            if (!idOf.TryGetValue(__instance, out id))
+                return;
+            // The game's own conditions: when one fails nothing happens here, so nothing is sent.
+            HealthHaver h = __instance.healthHaver;
+            if ((__instance.IsTransmogrified && __instance.ActorName == __0.ActorName) || __instance.IsMimicEnemy
+                || h == null || h.IsBoss || !h.IsVulnerable || __instance.ParentRoom == null)
+                return;
+            string to = __0.EnemyGuid;
+            if (string.IsNullOrEmpty(to))
+                return;
+            int level = LevelSync.CurrentLevelCode();
+            int kind = KindHash(__instance.EnemyGuid);
+            bool poof = __1 != null;
+            TransmogsSent++;
+            session.SendReliable(MsgType.Transmogrify, delegate (BinaryWriter w)
+            {
+                w.Write(level); w.Write(id); w.Write(kind); w.Write(to); w.Write(poof);
+            });
+        }
+
+        [HarmonyFinalizer]
+        [HarmonyPatch(typeof(AIActor), "Transmogrify")]
+        private static System.Exception AfterTransmogrify(System.Exception __exception) { PopSpawnParent(); return __exception; }
+
+        public static void OnTransmogrify(BinaryReader r)
+        {
+            int level = r.ReadInt32();
+            int id = r.ReadInt32();
+            int kind = r.ReadInt32();
+            string to = r.ReadString();
+            bool poof = r.ReadBoolean();
+            if (level != LevelSync.CurrentLevelCode() || string.IsNullOrEmpty(to) || to.Length > 64)
+                return;
+            CheckFloor();
+            // Not while a boss is being introduced here: the intro is still playing this enemy's animations, and
+            // taking the enemy away under it threw an error every frame from then on (seen with one of the Bullet
+            // King's servants, changed by a player whose intro was already over). It waits for the intro to end.
+            if (GameManager.IsBossIntro && pendingTransmogs.Count < 32)
+            {
+                PendingTransmog late = new PendingTransmog();
+                late.Id = id; late.Kind = kind; late.To = to; late.Poof = poof;
+                pendingTransmogs.Add(late);
+                return;
+            }
+            ApplyTransmog(id, kind, to, poof);
+        }
+
+        private struct PendingTransmog
+        {
+            public int Id, Kind;
+            public string To;
+            public bool Poof;
+        }
+        private static readonly List<PendingTransmog> pendingTransmogs = new List<PendingTransmog>();
+
+        private static void FlushPendingTransmogs()
+        {
+            if (pendingTransmogs.Count == 0 || GameManager.IsBossIntro)
+                return;
+            List<PendingTransmog> now = new List<PendingTransmog>(pendingTransmogs);
+            pendingTransmogs.Clear();
+            foreach (PendingTransmog t in now)
+                ApplyTransmog(t.Id, t.Kind, t.To, t.Poof);
+        }
+
+        private static void ApplyTransmog(int id, int kind, string to, bool poof)
+        {
+            AIActor a;
+            // Gone or dead here already, or the number belongs to another kind of enemy here: nothing to change.
+            if (!byId.TryGetValue(id, out a) || a == null || a.healthHaver == null || a.healthHaver.IsDead
+                || KindHash(a.EnemyGuid) != kind)
+                return;
+            AIActor prefab = EnemyDatabase.GetOrLoadByGuid(to);
+            if (prefab == null)
+                return;
+            GameObject vfx = poof ? ResourceCache.Acquire("Global VFX/VFX_Item_Spawn_Poof") as GameObject : null;
+            HealthHaver h = a.healthHaver;
+            bool wasVulnerable = h.IsVulnerable;
+            string name = a.name;
+            applyingTransmog = true;
+            remotelyKilled.Add(a); // its money dropped in the game that did this (the purse is shared)
+            try
+            {
+                h.IsVulnerable = true; // it happened in the other game; a brief "can't be hurt" here must not undo it
+                a.Transmogrify(prefab, vfx);
+                TransmogsCopied++;
+                Plugin.Log.LogInfo("Transmogrify from another game: " + name + " became " + prefab.name + ".");
+            }
+            catch (System.Exception e)
+            {
+                Plugin.Log.LogWarning("Couldn't copy a transmogrify of " + name + ": " + e.Message);
+            }
+            finally
+            {
+                applyingTransmog = false;
+                remotelyKilled.Remove(a);
+                if (!wasVulnerable && h != null)
+                    h.IsVulnerable = false; // as it was, if the game refused the change (harmless on one that is gone)
             }
         }
 
@@ -692,6 +925,7 @@ namespace GungeonOnline
             }
 
             TrackRemoteRooms(now);
+            FlushPendingTransmogs();
             ApplyCorrections();
             FlushPendingDamage(now);
             ReportBothLead(now);
@@ -847,6 +1081,12 @@ namespace GungeonOnline
                     + " ms.");
                 driftSum = driftWorst = delaySum = 0f;
                 driftCount = 0;
+            }
+            if (TargetSync.AimsUsed > 0 || TransmogsSent > 0 || TransmogsCopied > 0)
+            {
+                Plugin.Log.LogInfo("In the last minute: " + TargetSync.AimsUsed + " copied attacks aimed at the leader's aim point; transmogrifies sent "
+                    + TransmogsSent + ", copied " + TransmogsCopied + ".");
+                TargetSync.AimsUsed = TransmogsSent = TransmogsCopied = 0;
             }
         }
 

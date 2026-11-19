@@ -2,6 +2,7 @@
 
 Reviewed commit: `bcb228428121e28721bce74d0b5f35fce03abcf7` (`main`, version 0.161.0, protocol 49).
 Work branch: `audit/fable-review` (local only; nothing pushed); the commit list is at the end of this file.
+**Since 19 November the branch is protocol 50** (three changes; next section). Up to `f6bd19d` it is protocol 49.
 
 This file is the audit ledger and the handoff report in one. Every claim below is labelled with how it was
 checked. It has two parts: the first pass (10 November, read and fix, no multiplayer run) and a **second pass
@@ -10,6 +11,83 @@ section; where it changes something said later in this file, it says so.
 
 **A successful build is not a multiplayer test.** What the two-copy sessions exercised is listed in the second
 pass. Everything else is still *implemented and awaiting in-game verification*.
+
+---
+
+## Protocol 50 (19 November): three changes, and what is left for the maintainer
+
+**`Protocol.Version` is now 50.** A copy with this branch and a 0.161 copy refuse each other at hello (both are
+told why, GO-20). Everything up to commit `f6bd19d` is still protocol 49 and can be taken on its own.
+
+The owner of this audit picked the three changes a player would notice most out of a list of eleven. They are
+done and described here. The other eight were agreed but **not built**; they are written up below for the
+maintainer and their assistant, with the decisions already taken.
+
+### Done
+
+| ID | What | How | Checked |
+|---|---|---|---|
+| GO-46 | D-3 step 2, stable enemy numbers. An enemy made during play (a summon, a blob's halves, what a dying enemy leaves, a transmogrified animal) took the next number of its room's order, so a spawn only one game had, or two parents dying in another order, renumbered every later enemy of the room | Such enemies (anything registered inside `AIActor.Spawn`) get a number worked out from room + the enemy that made them + kind + which one of that kind from that parent. These numbers are negative, placed enemies keep room x 1000 + order. The maker is known from a small stack: `BehaviorSpeculator.Update`, `SpawnEnemyOnDeath.SpawnEnemies`, `AIActor.Transmogrify`, a copied attack; `RoomHandler.AddSpecificEnemyToRoomProcedurally` / `MakeRoomMoreDifficult` count as nobody. Code: `EnemySync.SpawnedId` | two-copy LAN, console-spawned blobs and Ammomancers in the same room: 29 of 29 numbers identical in the first session (blob to blobuloid to blobulin, three levels), 72 shared in the second. See "what differed" below |
+| GO-47 | S-1 rest, the aim point. A copied attack aimed at each game's own view of the attacked player, which is a network delay away from the leader's | `AttackStart` carries where the leader sees the target (+4 bytes). For the first half second of the copied attack the enemy aims at a body of its own standing there, gliding back to our own view (`TargetSync.AimAt`). Skipped under a tenth of a tile or over six tiles. Enemy `RobotechProjectile` rockets home on the player the enemy is after, not on the nearest local player (`TargetSync.AfterRocketStart`) | two-copy LAN at 35 ms added lag: 81 copied attacks used the aim point in 9 minutes, 0 errors. **The rocket part is not checked in game** (no rocket enemy came up) |
+| GO-48 | D-2 rest, transmogrify. The old enemy is taken out of the game, not killed, so nothing was sent: it stayed a full enemy in every other game | New message `Transmogrify` (58): level, enemy number, its kind, the new enemy's guid, poof or not. Sent from a prefix on `AIActor.Transmogrify` when the game's own conditions pass; the receiver runs the same call. The animal counts as made by the enemy it replaces, so it has the same number everywhere. Its money drops only in the game that did it. A change that arrives during a boss intro waits for the intro to end | two-copy LAN with a Hexagun and a Witch Pistol: 3 copied in the first session, 15 in the second, the animals' numbers identical. The intro wait fixes a real fault from the first session (below) |
+
+Found while testing GO-48 and fixed in it: a transmogrify of one of the Bullet King's servants arrived while the
+receiving game was still playing the boss intro. Taking the enemy away under the intro threw a
+`NullReferenceException` every frame for the rest of the session (6268 in the log, through
+`GenericIntroDoer.InvariantUpdate`). 0 exceptions in the session after the fix.
+
+What differed between the two games' numbers in the second session (87 made on the host, 81 on the guest, 72 the
+same), each traced in the logs:
+
+- Most: my test's own doing. The console `spawn` command went to both copies while the bots stood in different
+  rooms, so the "same" enemy was made in room 3 in one game and room 5 in the other. Not a mod fault.
+- One: a guest's bullet transmogrified a blob at the moment the host's shots killed it. The guest has a chicken,
+  the host the blob's halves. Each game finishes its own; the room still clears. A real race, small, **open**.
+- One: an Ammomancer's summon finished in the leading game and not in the following one (the copy died first).
+  The Shelleton exists in one game only. This is the old one-sided spawn. It no longer renumbers anybody, but the
+  following game still has no enemy for that number. **Open**: a follower could make the missing enemy when it
+  is told about a spawned number it doesn't have.
+
+Not done for these three: a human play-test, Steam, three or four players, the homing rockets.
+
+### Left for the maintainer (agreed with the owner, not built)
+
+The first group changes a message and belongs in protocol 50 too if it is added before a release; after a
+release each needs its own bump.
+
+| ID | What | Decision already taken | Notes for building it |
+|---|---|---|---|
+| S-4 | A teleporting enemy can land in a different place in each game (the dice are shared since GO-37, the free cells are not always the same) | send the landing spot | about 18 bytes per teleport; hook where `TeleportBehavior.DoTeleport` has picked the cell and place the copy there |
+| P-8 | `EnemyDamage` is 47 bytes, 33 of them the enemy guid string | send `KindHash` (4 bytes) as `EnemyStates` and `EnemyEffect` already do | `EnemyDied` and `AttackStart` carry the same string and can go the same way |
+| P-9 | One `Shot` datagram per shotgun pellet | batch the pellets of one frame into one message | about 75% less for a shotgun; measured figures in section C |
+| D-5 | Remembered gear and the stand-in are keyed by a name the client sends; on LAN two "Player"s share one entry | Steam: the Steam ID from the transport. LAN: a random ID made once and saved in the config, sent in hello | hello gains a field |
+| D-4 | Receivers accept room messages from any player. `EnemySync.MayLead` already decides and only counts (GO-44): 0 refusals in a 10-minute session | make it refuse, **with a switch**: the host decides for the whole session and tells guests on join. Proposed default: check on. The "legacy" setting keeps today's behaviour on purpose: if enemies fail to sync, one player finishing the room still clears it for everyone | the host's setting needs a place in `Rules` or hello |
+
+No message change:
+
+| ID | What | Notes |
+|---|---|---|
+| S-2 | Knockback is counted twice on followed enemies: the leader's reported velocity includes it and the follower adds its own | small; wants a person to look at how hits feel afterwards |
+| S-5 | With a stand-in the host's game is in two-player mode. All four parts were wanted: the trapdoor exit for a flying host (same fix as GO-30 on another method), enemy health and bullet speed, shop prices and drop chances, the mid-game save marked co-op | the stand-in's beams not being shown to guests is the bot work below |
+| P-11 | Dead enemies stay in `EnemySync.byId` and are walked 15 times a second (GO-45 did the rest of P-11) | remove on death, or sweep once a second |
+
+Held on purpose:
+
+| ID | Why |
+|---|---|
+| S-3 | the Dragun's near-death attacks: needs the fight to look at |
+| P-10 | `Autopilot.FillActions` cost: goes with the bot rework |
+| BOT-1 | the bot rework itself (the stand-in's beams for guests among it); a tag used in the owner's planning, not yet a row elsewhere in this file |
+
+Cut: D-6 (already fixed in the second pass).
+
+### How these sessions were run
+
+`lan-test.ps1` (outside the repo) now gives each test copy the whole modpack the mod is played in (Alexandria,
+Mod the Gungeon API, Gunfig, Loop The Gungeon, Custom Characters and others, twelve plugins), not the mod alone.
+A test-only helper plugin feeds lines to the Mod the Gungeon API console (`ETGModConsole.Instance.ParseCommand`),
+so a script can `give hexagun`, `spawn blobulon`, `godmode true` in either copy. Each enemy made in play logs
+one line with its number, which is how the two games were compared.
 
 ---
 
@@ -147,11 +225,11 @@ the exit leads); old hosts ignore it and a new host accepts its absence. `Protoc
 
 | ID | What | Why it waits |
 |---|---|---|
-| D-3 step 2 | Enemy numbers still depend on each game's spawn order. A design exists: enemies made by `AIActor.Spawn` (summons, split blobs, spawn-on-death) get a number from room + parent + kind in a separate range, so a one-sided spawn shifts nothing | changes what a number means: needs a `Protocol.Version` bump and a test with summoners |
+| D-3 step 2 | *(done 19 November: GO-46.)* Enemy numbers still depend on each game's spawn order. A design exists: enemies made by `AIActor.Spawn` (summons, split blobs, spawn-on-death) get a number from room + parent + kind in a separate range, so a one-sided spawn shifts nothing | changes what a number means: needs a `Protocol.Version` bump and a test with summoners |
 | D-4 | Receivers don't refuse messages from a player who doesn't lead the room. The check exists and counts (GO-44) | switch it on once the counts from real play stay at zero |
 | D-5 | Remembered gear keyed by a name the client sends | design choice |
-| D-2 rest | Bullet copies still roll their own status-effect dice; transmogrify is not synced | touches how items feel |
-| S-1 | *(done: see "Enemy attacks and bullets" above.)* What remains there: aimed patterns still aim at each game's own view of the target; enemy homing rockets home on each game's own player | cosmetic / design decision |
+| D-2 rest | *(transmogrify done 19 November: GO-48.)* Bullet copies still roll their own status-effect dice; transmogrify is not synced | touches how items feel |
+| S-1 | *(done: see "Enemy attacks and bullets" above.)* *(Both done 19 November: GO-47; rockets unchecked in game.)* What remains there: aimed patterns still aim at each game's own view of the target; enemy homing rockets home on each game's own player | cosmetic / design decision |
 | S-2 | Knockback is counted twice on followed enemies (the leader's reported velocity includes it, the follower adds its own) | fixing it changes how hits feel; wants eyes on it |
 | S-3 | The Dragun's near-death attack group is private to its behaviour and not synced after the first pattern; the Advanced Dragun path spawns a separate enemy from local state | boss-specific, needs the fight |
 | S-4 | *(fixed: GO-38.)* Large "worst drift" readings (10 to 20 tiles) still occur: a teleport's destination is picked per game. GO-37 seeds it, which only helps when both games have the same candidate cells | needs the destination sent (protocol change) |
@@ -591,4 +669,5 @@ Blind spots:
 | `b98eb5e` | second-pass section of this file |
 | `4dc124d` | GO-37 … GO-41 |
 | `c180045` | this file: enemy attacks and bullets |
-| (this commit) | GO-42 … GO-45 |
+| `f6bd19d` | GO-42 … GO-45 |
+| (this commit) | protocol 50: GO-46, GO-47, GO-48 |
